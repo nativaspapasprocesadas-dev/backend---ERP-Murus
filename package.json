@@ -1,0 +1,63 @@
+{
+  "name": "backend-erp-papas",
+  "version": "2.3.0",
+  "description": "Backend ERP para distribución de papas - Erika",
+  "main": "index.js",
+  "scripts": {
+    "//": "========== UTILIDADES ==========",
+    "dev": "set NODE_ENV=development&& nodemon index.js",
+    "dev:watch": "nodemon --watch . --ext js,json index.js",
+    "start": "node index.js",
+    "start:prod": "set NODE_ENV=production&& node index.js",
+    "db:generate": "npx prisma generate",
+    "db:push": "npx prisma db push",
+    "db:pull": "npx prisma db pull",
+    "db:migrate": "npx prisma migrate dev",
+    "db:migrate:prod": "npx prisma migrate deploy",
+    "db:seed": "npx prisma db seed",
+    "db:studio": "npx prisma studio",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "lint": "eslint .",
+    "ping": "curl http://localhost:4020/api/ping"
+  },
+  "keywords": [
+    "erp",
+    "papas",
+    "distribucion",
+    "express",
+    "prisma",
+    "postgresql"
+  ],
+  "author": "Desarrollo",
+  "license": "ISC",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.978.0",
+    "@aws-sdk/lib-storage": "^3.978.0",
+    "@prisma/client": "^6.16.0",
+    "@types/node": "^24.1.0",
+    "bcrypt": "^6.0.0",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.5",
+    "csv-parser": "^3.2.0",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.0.2",
+    "pg": "^8.16.3",
+    "socket.io": "^4.8.3",
+    "uuid": "^11.1.0",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10",
+    "prisma": "^6.16.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.2"
+  },
+  "prisma": {
+    "seed": "node prisma/seed.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

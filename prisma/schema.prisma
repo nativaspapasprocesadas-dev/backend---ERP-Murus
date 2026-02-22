@@ -1,0 +1,598 @@
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║                         PRISMA SCHEMA - ERP PAPAS                            ║
+// ║                                                                              ║
+// ║  🏠 DESARROLLO LOCAL:                                                        ║
+// ║     - Base de datos: db_ERP_murus (PostgreSQL local)                         ║
+// ║     - DATABASE_URL en .env apunta a localhost:5432                           ║
+// ║                                                                              ║
+// ║  🚀 PRODUCCIÓN (Railway):                                                    ║
+// ║     - Base de datos: PostgreSQL Railway                                       ║
+// ║     - DATABASE_URL configurada automáticamente por Railway                    ║
+// ║                                                                              ║
+// ║  Comandos útiles:                                                             ║
+// ║     - npm run db:generate  → Genera el cliente Prisma                        ║
+// ║     - npm run db:push      → Sincroniza schema con DB                        ║
+// ║     - npm run db:studio    → Abre Prisma Studio                              ║
+// ║                                                                              ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ============================================================================
+// CONFIGURACIÓN DE BASE DE DATOS
+// ============================================================================
+// La URL se toma de la variable de entorno DATABASE_URL
+// En desarrollo: postgresql://postgres:sql@localhost:5432/db_ERP_murus
+// En producción: Railway la configura automáticamente
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// MODELOS DE GESTIÓN DE USUARIOS Y PERMISOS
+// ============================================================================
+
+model branches {
+  id                     Int       @id @default(autoincrement())
+  name                   String    @db.VarChar(100)
+  code                   String    @unique @db.VarChar(20)
+  address                String?   @db.VarChar(255)
+  phone                  String?   @db.VarChar(50)
+  email                  String?   @db.VarChar(100)
+  manager                String?   @db.VarChar(100)
+  is_main                Boolean?  @default(false)
+  color                  String?   @db.VarChar(20)
+  status                 String?   @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime? @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime? @db.Timestamptz(6)
+  users                  users[]
+
+  @@index([code], map: "idx_branches_code")
+  @@index([is_main], map: "idx_branches_is_main")
+  @@index([status], map: "idx_branches_status")
+}
+
+model customers {
+  id                     Int               @id @default(autoincrement())
+  user_id                Int               @unique
+  address                String?           @db.VarChar(255)
+  route_id               Int?
+  contact_name           String?           @db.VarChar(150)
+  contact_position       String?           @db.VarChar(100)
+  contact_phone          String?           @db.VarChar(50)
+  credit_days            Int?              @default(0)
+  current_balance        Decimal?          @default(0.00) @db.Decimal(12, 2)
+  status                 String?           @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime?         @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime?         @db.Timestamptz(6)
+  customer_type          String?           @default("RECURRENTE") @db.VarChar(20)
+  credit_limit           Decimal?          @default(10000.00) @db.Decimal(12, 2)
+  users                  users             @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_customers_user")
+  precios_cliente        precios_cliente[]
+
+  @@index([route_id], map: "idx_customers_route_id")
+  @@index([status], map: "idx_customers_status")
+  @@index([user_id], map: "idx_customers_user_id")
+  @@index([customer_type], map: "idx_customers_type")
+}
+
+model permissions {
+  id                     Int                 @id @default(autoincrement())
+  name                   String              @unique @db.VarChar(100)
+  description            String?             @db.VarChar(255)
+  module                 String?             @db.VarChar(100)
+  status                 String?             @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime?           @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime?           @db.Timestamptz(6)
+  roles_permissions      roles_permissions[]
+
+  @@index([module], map: "idx_permissions_module")
+  @@index([name], map: "idx_permissions_name")
+  @@index([status], map: "idx_permissions_status")
+}
+
+model roles {
+  id                     Int                 @id @default(autoincrement())
+  name                   String              @unique @db.VarChar(50)
+  description            String?             @db.VarChar(255)
+  status                 String?             @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime?           @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime?           @db.Timestamptz(6)
+  roles_permissions      roles_permissions[]
+  users                  users[]
+
+  @@index([name], map: "idx_roles_name")
+  @@index([status], map: "idx_roles_status")
+}
+
+model roles_permissions {
+  id                     Int         @id @default(autoincrement())
+  role_id                Int
+  permission_id          Int
+  status                 String?     @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime?   @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime?   @db.Timestamptz(6)
+  permissions            permissions @relation(fields: [permission_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_roles_permissions_permission")
+  roles                  roles       @relation(fields: [role_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_roles_permissions_role")
+
+  @@unique([role_id, permission_id], map: "uk_roles_permissions")
+  @@index([permission_id], map: "idx_roles_permissions_permission_id")
+  @@index([role_id], map: "idx_roles_permissions_role_id")
+  @@index([status], map: "idx_roles_permissions_status")
+}
+
+model user_sessions {
+  id                     Int       @id @default(autoincrement())
+  user_id                Int
+  token                  String    @db.VarChar(500)
+  ip_address             String?   @db.VarChar(45)
+  user_agent             String?   @db.VarChar(500)
+  expires_at             DateTime  @db.Timestamptz(6)
+  is_valid               Boolean?  @default(true)
+  status                 String?   @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime? @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime? @db.Timestamptz(6)
+  users                  users     @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_user_sessions_user")
+
+  @@index([expires_at], map: "idx_user_sessions_expires_at")
+  @@index([is_valid], map: "idx_user_sessions_is_valid")
+  @@index([status], map: "idx_user_sessions_status")
+  @@index([token], map: "idx_user_sessions_token")
+  @@index([user_id], map: "idx_user_sessions_user_id")
+}
+
+model users {
+  id                     Int             @id @default(autoincrement())
+  name                   String          @db.VarChar(150)
+  email                  String          @unique @db.VarChar(150)
+  password               String          @db.VarChar(255)
+  role_id                Int
+  phone                  String?         @db.VarChar(50)
+  is_active              Boolean?        @default(true)
+  branch_id              Int?
+  status                 String?         @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime?       @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime?       @db.Timestamptz(6)
+  customers              customers?
+  user_sessions          user_sessions[]
+  branches               branches?       @relation(fields: [branch_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_users_branch")
+  roles                  roles           @relation(fields: [role_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_users_role")
+
+  @@index([branch_id], map: "idx_users_branch_id")
+  @@index([email], map: "idx_users_email")
+  @@index([is_active], map: "idx_users_is_active")
+  @@index([role_id], map: "idx_users_role_id")
+  @@index([status], map: "idx_users_status")
+}
+
+// ============================================================================
+// MODELOS DE CATÁLOGO DE PRODUCTOS
+// ============================================================================
+
+model especies {
+  id                     Int         @id @default(autoincrement())
+  nombre                 String      @db.VarChar(100)
+  descripcion            String?
+  status                 String?     @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime?   @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime?   @db.Timestamptz(6)
+  productos              productos[]
+
+  @@index([nombre], map: "idx_especies_nombre")
+  @@index([status], map: "idx_especies_status")
+}
+
+model medidas {
+  id                     Int         @id @default(autoincrement())
+  nombre                 String      @db.VarChar(50)
+  abreviatura            String      @db.VarChar(50)
+  factor_conversion      Decimal?    @db.Decimal(10, 4)
+  status                 String?     @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime?   @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime?   @db.Timestamptz(6)
+  productos              productos[]
+
+  @@index([nombre], map: "idx_medidas_nombre")
+  @@index([status], map: "idx_medidas_status")
+}
+
+model presentaciones {
+  id                     Int         @id @default(autoincrement())
+  nombre                 String      @db.VarChar(100)
+  descripcion            String?
+  status                 String?     @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime?   @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime?   @db.Timestamptz(6)
+  peso                   Decimal?    @default(1.0000) @db.Decimal(10, 4)
+  productos              productos[]
+
+  @@index([nombre], map: "idx_presentaciones_nombre")
+  @@index([status], map: "idx_presentaciones_status")
+  @@index([peso], map: "idx_presentaciones_peso")
+}
+
+model productos {
+  id                     Int               @id @default(autoincrement())
+  codigo                 String            @unique @db.VarChar(50)
+  nombre                 String            @db.VarChar(150)
+  especie_id             Int
+  medida_id              Int
+  presentacion_id        Int
+  precio_base            Decimal           @db.Decimal(10, 2)
+  stock_actual           Decimal?          @default(0) @db.Decimal(10, 2)
+  stock_minimo           Decimal?          @default(0) @db.Decimal(10, 2)
+  status                 String?           @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime?         @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime?         @db.Timestamptz(6)
+  imagen_url             String?           @db.VarChar(500)
+  visible_en_catalogo    Boolean?          @default(true)
+  pedido_detalles        pedido_detalles[]
+  precios_cliente        precios_cliente[]
+  especies               especies          @relation(fields: [especie_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_productos_especie")
+  medidas                medidas           @relation(fields: [medida_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_productos_medida")
+  presentaciones         presentaciones    @relation(fields: [presentacion_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_productos_presentacion")
+
+  @@index([codigo], map: "idx_productos_codigo")
+  @@index([especie_id], map: "idx_productos_especie_id")
+  @@index([medida_id], map: "idx_productos_medida_id")
+  @@index([presentacion_id], map: "idx_productos_presentacion_id")
+  @@index([status], map: "idx_productos_status")
+  @@index([visible_en_catalogo], map: "idx_productos_visible_catalogo")
+}
+
+model precios_cliente {
+  id                     Int       @id @default(autoincrement())
+  customer_id            Int
+  producto_id            Int
+  precio_especial        Decimal   @db.Decimal(10, 2)
+  fecha_inicio           DateTime? @db.Date
+  fecha_fin              DateTime? @db.Date
+  status                 String?   @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime? @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime? @db.Timestamptz(6)
+  customers              customers @relation(fields: [customer_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_precios_cliente_customer")
+  productos              productos @relation(fields: [producto_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_precios_cliente_producto")
+
+  @@unique([customer_id, producto_id], map: "uk_precios_cliente")
+  @@index([customer_id], map: "idx_precios_cliente_customer_id")
+  @@index([producto_id], map: "idx_precios_cliente_producto_id")
+  @@index([status], map: "idx_precios_cliente_status")
+}
+
+// ============================================================================
+// MODELOS DE GESTIÓN DE PEDIDOS
+// ============================================================================
+
+model pedidos {
+  id                     Int                   @id @default(autoincrement())
+  numero_pedido          String                @unique @db.VarChar(30)
+  customer_id            Int
+  branch_id              Int
+  user_id_vendedor       Int
+  fecha_pedido           DateTime              @db.Date
+  fecha_entrega          DateTime?             @db.Date
+  estado                 String                @default("pendiente") @db.VarChar(30)
+  tipo_pedido            String                @default("normal") @db.VarChar(20)
+  subtotal               Decimal               @db.Decimal(12, 2)
+  descuento              Decimal?              @default(0) @db.Decimal(12, 2)
+  total                  Decimal               @db.Decimal(12, 2)
+  observaciones          String?
+  ruta_diaria_id         Int?
+  status                 String?               @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime?             @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime?             @db.Timestamptz(6)
+  voucher_url            String?               @db.VarChar(500)
+  estado_pago            String?               @default("PENDIENTE") @db.VarChar(20)
+  tipo_pago              String?               @db.VarChar(20)
+  pago_anticipado        Boolean?              @default(false)
+  correlativo_sede       Int?
+  movimientos_credito    movimientos_credito[]
+  pedido_detalles        pedido_detalles[]
+  rutas_diarias          rutas_diarias?        @relation(fields: [ruta_diaria_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_pedidos_ruta_diaria")
+
+  @@index([customer_id], map: "idx_pedidos_customer_id")
+  @@index([branch_id], map: "idx_pedidos_branch_id")
+  @@index([user_id_vendedor], map: "idx_pedidos_user_id_vendedor")
+  @@index([fecha_pedido], map: "idx_pedidos_fecha_pedido")
+  @@index([estado], map: "idx_pedidos_estado")
+  @@index([ruta_diaria_id], map: "idx_pedidos_ruta_diaria_id")
+  @@index([status], map: "idx_pedidos_status")
+  @@index([estado_pago], map: "idx_pedidos_estado_pago")
+  @@index([tipo_pago], map: "idx_pedidos_tipo_pago")
+  @@index([branch_id, correlativo_sede], map: "idx_pedidos_branch_correlativo")
+}
+
+model pedido_detalles {
+  id                     Int       @id @default(autoincrement())
+  pedido_id              Int
+  producto_id            Int
+  cantidad               Decimal   @db.Decimal(10, 2)
+  precio_unitario        Decimal   @db.Decimal(10, 2)
+  descuento_linea        Decimal?  @default(0) @db.Decimal(10, 2)
+  subtotal_linea         Decimal   @db.Decimal(12, 2)
+  status                 String?   @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime? @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime? @db.Timestamptz(6)
+  listo                  Boolean?  @default(false)
+  listo_por_user_id      Int?
+  listo_fecha            DateTime? @db.Timestamptz(6)
+  pedidos                pedidos   @relation(fields: [pedido_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_pedido_detalles_pedido")
+  productos              productos @relation(fields: [producto_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_pedido_detalles_producto")
+
+  @@index([pedido_id], map: "idx_pedido_detalles_pedido_id")
+  @@index([producto_id], map: "idx_pedido_detalles_producto_id")
+  @@index([status], map: "idx_pedido_detalles_status")
+}
+
+// ============================================================================
+// MODELOS DE GESTIÓN DE RUTAS Y LOGÍSTICA
+// ============================================================================
+
+model rutas_config {
+  id                     Int             @id @default(autoincrement())
+  nombre                 String          @db.VarChar(100)
+  descripcion            String?
+  branch_id              Int
+  dia_semana             Int?
+  orden                  Int?            @default(0)
+  status                 String?         @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime?       @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime?       @db.Timestamptz(6)
+  color                  String?         @default("#3B82F6") @db.VarChar(7)
+  hora_limite_recepcion  String?         @db.VarChar(10)
+  rutas_diarias          rutas_diarias[]
+
+  @@index([nombre], map: "idx_rutas_config_nombre")
+  @@index([branch_id], map: "idx_rutas_config_branch_id")
+  @@index([status], map: "idx_rutas_config_status")
+}
+
+model rutas_diarias {
+  id                     Int          @id @default(autoincrement())
+  ruta_config_id         Int
+  fecha                  DateTime     @db.Date
+  estado                 String       @default("pendiente") @db.VarChar(30)
+  hora_inicio            DateTime?    @db.Timestamptz(6)
+  hora_fin               DateTime?    @db.Timestamptz(6)
+  kilometraje_inicio     Decimal?     @db.Decimal(10, 2)
+  kilometraje_fin        Decimal?     @db.Decimal(10, 2)
+  observaciones          String?
+  status                 String?      @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime?    @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime?    @db.Timestamptz(6)
+  chofer_id              Int?
+  pedidos                pedidos[]
+  rutas_config           rutas_config @relation(fields: [ruta_config_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_rutas_diarias_ruta_config")
+  choferes               choferes?    @relation(fields: [chofer_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([ruta_config_id], map: "idx_rutas_diarias_ruta_config_id")
+  @@index([fecha], map: "idx_rutas_diarias_fecha")
+  @@index([estado], map: "idx_rutas_diarias_estado")
+  @@index([status], map: "idx_rutas_diarias_status")
+  @@index([chofer_id], map: "idx_rutas_diarias_chofer_id")
+}
+
+model choferes {
+  id                     Int             @id @default(autoincrement())
+  nombre                 String          @db.VarChar(200)
+  telefono               String?         @db.VarChar(20)
+  licencia               String?         @db.VarChar(50)
+  fecha_vencimiento_lic  DateTime?       @db.Date
+  branch_id              Int
+  is_active              Boolean?        @default(true)
+  status                 String?         @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime?       @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime?       @db.Timestamptz(6)
+  notas                  String?
+  rutas_diarias          rutas_diarias[]
+
+  @@index([branch_id], map: "idx_choferes_branch_id")
+  @@index([status], map: "idx_choferes_status")
+}
+
+// ============================================================================
+// MODELOS DE GESTIÓN FINANCIERA
+// ============================================================================
+
+model movimientos_credito {
+  id                     Int       @id @default(autoincrement())
+  customer_id            Int
+  pedido_id              Int?
+  tipo_movimiento        String    @db.VarChar(20)
+  monto                  Decimal   @db.Decimal(12, 2)
+  saldo_anterior         Decimal   @db.Decimal(12, 2)
+  saldo_nuevo            Decimal   @db.Decimal(12, 2)
+  descripcion            String?
+  fecha_movimiento       DateTime  @default(now()) @db.Timestamptz(6)
+  status                 String?   @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime? @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime? @db.Timestamptz(6)
+  voucher_url            String?   @db.VarChar(500)
+  metodo_pago            String?   @db.VarChar(20)
+  referencia_pago        String?   @db.VarChar(100)
+  fecha_vencimiento      DateTime? @db.Timestamptz(6)
+  firma_digital          String?
+  pedidos                pedidos?  @relation(fields: [pedido_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_movimientos_credito_pedido")
+
+  @@index([customer_id], map: "idx_movimientos_credito_customer_id")
+  @@index([pedido_id], map: "idx_movimientos_credito_pedido_id")
+  @@index([tipo_movimiento], map: "idx_movimientos_credito_tipo")
+  @@index([fecha_movimiento], map: "idx_movimientos_credito_fecha")
+  @@index([status], map: "idx_movimientos_credito_status")
+  @@index([metodo_pago], map: "idx_movimientos_metodo_pago")
+  @@index([fecha_vencimiento], map: "idx_movimientos_credito_fecha_vencimiento")
+}
+
+// ============================================================================
+// MODELOS DE COMUNICACIÓN
+// ============================================================================
+
+model comunicados {
+  id                       Int                        @id @default(autoincrement())
+  titulo                   String                     @db.VarChar(200)
+  contenido                String
+  tipo                     String                     @db.VarChar(30)
+  branch_id                Int?
+  user_id_autor            Int
+  fecha_publicacion        DateTime                   @default(now()) @db.Timestamptz(6)
+  fecha_expiracion         DateTime?                  @db.Timestamptz(6)
+  es_urgente               Boolean?                   @default(false)
+  status                   String?                    @default("active") @db.VarChar(20)
+  user_id_registration     Int?
+  date_time_registration   DateTime?                  @default(now()) @db.Timestamptz(6)
+  user_id_modification     Int?
+  date_time_modification   DateTime?                  @db.Timestamptz(6)
+  imagen_url               String?                    @db.VarChar(500)
+  comunicado_destinatarios comunicado_destinatarios[]
+  comunicado_lecturas      comunicado_lecturas[]
+
+  @@index([branch_id], map: "idx_comunicados_branch_id")
+  @@index([user_id_autor], map: "idx_comunicados_user_id_autor")
+  @@index([tipo], map: "idx_comunicados_tipo")
+  @@index([fecha_publicacion], map: "idx_comunicados_fecha_publicacion")
+  @@index([status], map: "idx_comunicados_status")
+}
+
+model comentarios {
+  id                     Int       @id @default(autoincrement())
+  entidad_tipo           String    @db.VarChar(50)
+  entidad_id             Int
+  user_id                Int
+  contenido              String
+  fecha_comentario       DateTime  @default(now()) @db.Timestamptz(6)
+  status                 String?   @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime? @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime? @db.Timestamptz(6)
+
+  @@index([entidad_tipo, entidad_id], map: "idx_comentarios_entidad")
+  @@index([user_id], map: "idx_comentarios_user_id")
+  @@index([status], map: "idx_comentarios_status")
+}
+
+// ============================================================================
+// MODELOS DE PRODUCCIÓN
+// ============================================================================
+
+model pizarra_produccion {
+  id                     Int       @id @default(autoincrement())
+  fecha                  DateTime  @db.Date
+  especie_id             Int
+  medida_id              Int
+  presentacion_id        Int
+  ruta_config_id         Int?
+  cantidad_solicitada    Decimal   @db.Decimal(10, 2)
+  cantidad_producida     Decimal?  @default(0) @db.Decimal(10, 2)
+  estado                 String    @default("pendiente") @db.VarChar(30)
+  prioridad              Int?      @default(0)
+  observaciones          String?
+  status                 String?   @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime? @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime? @db.Timestamptz(6)
+
+  @@index([fecha], map: "idx_pizarra_produccion_fecha")
+  @@index([especie_id], map: "idx_pizarra_produccion_especie_id")
+  @@index([estado], map: "idx_pizarra_produccion_estado")
+  @@index([status], map: "idx_pizarra_produccion_status")
+}
+
+// ============================================================================
+// MODELOS DE CONFIGURACIÓN DEL SISTEMA
+// ============================================================================
+
+model configuracion_sistema {
+  id                     Int       @id @default(autoincrement())
+  clave                  String    @unique @db.VarChar(100)
+  valor                  String
+  tipo_dato              String    @db.VarChar(20)
+  descripcion            String?
+  modulo                 String?   @db.VarChar(50)
+  es_editable            Boolean?  @default(true)
+  status                 String?   @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime? @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime? @db.Timestamptz(6)
+
+  @@index([clave], map: "idx_configuracion_sistema_clave")
+  @@index([modulo], map: "idx_configuracion_sistema_modulo")
+  @@index([status], map: "idx_configuracion_sistema_status")
+}
+
+model comunicado_destinatarios {
+  id                     Int         @id @default(autoincrement())
+  comunicado_id          Int
+  customer_id            Int
+  status                 String?     @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime?   @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime?   @db.Timestamptz(6)
+  comunicados            comunicados @relation(fields: [comunicado_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_comunicado_destinatarios_comunicado")
+
+  @@unique([comunicado_id, customer_id], map: "uk_comunicado_destinatarios")
+  @@index([comunicado_id], map: "idx_comunicado_destinatarios_comunicado_id")
+  @@index([customer_id], map: "idx_comunicado_destinatarios_customer_id")
+  @@index([status], map: "idx_comunicado_destinatarios_status")
+}
+
+model comunicado_lecturas {
+  id                     Int         @id @default(autoincrement())
+  comunicado_id          Int
+  customer_id            Int
+  fecha_lectura          DateTime    @default(now()) @db.Timestamptz(6)
+  status                 String?     @default("active") @db.VarChar(20)
+  user_id_registration   Int?
+  date_time_registration DateTime?   @default(now()) @db.Timestamptz(6)
+  user_id_modification   Int?
+  date_time_modification DateTime?   @db.Timestamptz(6)
+  comunicados            comunicados @relation(fields: [comunicado_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_comunicado_lecturas_comunicado")
+
+  @@unique([comunicado_id, customer_id], map: "uk_comunicado_lecturas")
+  @@index([comunicado_id], map: "idx_comunicado_lecturas_comunicado_id")
+  @@index([customer_id], map: "idx_comunicado_lecturas_customer_id")
+  @@index([fecha_lectura], map: "idx_comunicado_lecturas_fecha")
+  @@index([status], map: "idx_comunicado_lecturas_status")
+}
