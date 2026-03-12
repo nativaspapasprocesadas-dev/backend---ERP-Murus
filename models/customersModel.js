@@ -11,10 +11,12 @@ const pool = require('../config/db');
  * @returns {Promise<Object>} Lista paginada de clientes
  */
 const listCustomers = async ({ page = 1, pageSize = 20, search, customerType, branchId, userId, roleName }) => {
-  // Validar pageSize maximo 100
-  pageSize = Math.min(parseInt(pageSize) || 20, 100);
+  // pageSize=0 significa sin limite (retornar todos los registros)
+  const parsedPageSize = parseInt(pageSize);
+  const allRecords = parsedPageSize === 0;
+  pageSize = allRecords ? 0 : Math.min(parsedPageSize || 20, 100);
   page = parseInt(page) || 1;
-  const offset = (page - 1) * pageSize;
+  const offset = allRecords ? 0 : (page - 1) * pageSize;
 
   let whereConditions = ["c.status = 'active'", "u.status = 'active'"];
   const params = [];
@@ -135,9 +137,11 @@ const listCustomers = async ({ page = 1, pageSize = 20, search, customerType, br
     LEFT JOIN rutas_config rc ON c.route_id = rc.id
     ${whereClause}
     ORDER BY u.name ASC
-    LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    ${allRecords ? '' : `LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`}
   `;
-  params.push(pageSize, offset);
+  if (!allRecords) {
+    params.push(pageSize, offset);
+  }
 
   const dataResult = await pool.query(dataQuery, params);
 
@@ -169,9 +173,9 @@ const listCustomers = async ({ page = 1, pageSize = 20, search, customerType, br
     }),
     pagination: {
       total,
-      page,
-      pageSize,
-      totalPages: Math.ceil(total / pageSize)
+      page: allRecords ? 1 : page,
+      pageSize: allRecords ? total : pageSize,
+      totalPages: allRecords ? 1 : Math.ceil(total / pageSize)
     }
   };
 };

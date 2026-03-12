@@ -198,7 +198,7 @@ const list = async (req, res) => {
 
     const result = await listCustomers({
       page: parseInt(page) || 1,
-      pageSize: parseInt(pageSize) || 20,
+      pageSize: pageSize !== undefined ? parseInt(pageSize) : 20,
       search: search || null,
       customerType: customerType || null,
       branchId: branchId ? parseInt(branchId) : userBranchId,

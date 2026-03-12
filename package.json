@@ -7,6 +7,7 @@
     "//": "========== UTILIDADES ==========",
     "dev": "set NODE_ENV=development&& nodemon index.js",
     "dev:watch": "nodemon --watch . --ext js,json index.js",
+    "build": "npx prisma generate",
     "start": "node index.js",
     "start:prod": "set NODE_ENV=production&& node index.js",
     "db:generate": "npx prisma generate",

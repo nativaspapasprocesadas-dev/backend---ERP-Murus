@@ -39,9 +39,10 @@ const listProducts = async (req, res) => {
     // Solo permitir includeHidden para roles administrativos (no clientes)
     const shouldIncludeHidden = includeHidden === 'true' && isAdmin;
 
+    const parsedPageSize = parseInt(pageSize);
     const result = await catalogModel.listProducts({
       page: parseInt(page) || 1,
-      pageSize: parseInt(pageSize) || 20,
+      pageSize: isNaN(parsedPageSize) ? undefined : parsedPageSize,
       speciesId: speciesId ? parseInt(speciesId) : null,
       measureId: measureId ? parseInt(measureId) : null,
       customerId,

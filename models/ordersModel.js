@@ -12,10 +12,12 @@ const { getPeruTimeString, getPeruDate, getPeruDateTomorrow, getPeruDateString }
  * @returns {Promise<Object>} Lista paginada de pedidos
  */
 const listOrders = async ({ page = 1, pageSize = 20, status, customerId, branchId, dateFrom, dateTo, userId, roleName }) => {
-  // Validar pageSize maximo 100
-  pageSize = Math.min(parseInt(pageSize) || 20, 100);
+  // pageSize=0 significa sin limite (retornar todos los registros)
+  const parsedPageSize = parseInt(pageSize);
+  const allRecords = parsedPageSize === 0;
+  pageSize = allRecords ? 0 : Math.min(parsedPageSize || 20, 100);
   page = parseInt(page) || 1;
-  const offset = (page - 1) * pageSize;
+  const offset = allRecords ? 0 : (page - 1) * pageSize;
 
   // Normalizar rol para comparacion case-insensitive
   const normalizedRole = roleName?.toLowerCase() || '';
@@ -104,9 +106,11 @@ const listOrders = async ({ page = 1, pageSize = 20, status, customerId, branchI
     LEFT JOIN branches b ON p.branch_id = b.id
     ${whereClause}
     ORDER BY p.date_time_registration DESC
-    LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    ${allRecords ? '' : `LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`}
   `;
-  params.push(pageSize, offset);
+  if (!allRecords) {
+    params.push(pageSize, offset);
+  }
 
   const dataResult = await pool.query(dataQuery, params);
 
@@ -135,9 +139,9 @@ const listOrders = async ({ page = 1, pageSize = 20, status, customerId, branchI
     })),
     pagination: {
       total,
-      page,
-      pageSize,
-      totalPages: Math.ceil(total / pageSize)
+      page: allRecords ? 1 : page,
+      pageSize: allRecords ? total : pageSize,
+      totalPages: allRecords ? 1 : Math.ceil(total / pageSize)
     }
   };
 };
@@ -704,6 +708,48 @@ const updateOrder = async (orderId, items, userId) => {
       WHERE id = $4
     `, [newSubtotal, newTotal, userId, orderId]);
 
+    // Sincronizar CARGO en movimientos_credito si el pedido tiene uno (clientes RECURRENTES)
+    // El CARGO se creó al momento de crear el pedido con el total original.
+    // Si el total cambió, debemos actualizar el monto del CARGO y el saldo del cliente.
+    const cargoQuery = await client.query(`
+      SELECT mc.id, mc.monto, mc.customer_id
+      FROM movimientos_credito mc
+      WHERE mc.pedido_id = $1 AND mc.tipo_movimiento = 'CARGO' AND mc.status = 'active'
+    `, [orderId]);
+
+    if (cargoQuery.rows.length > 0) {
+      const cargo = cargoQuery.rows[0];
+      const oldCargoMonto = parseFloat(cargo.monto) || 0;
+      const diferencia = newTotal - oldCargoMonto;
+
+      if (Math.abs(diferencia) > 0.01) {
+        // Actualizar monto del CARGO
+        await client.query(`
+          UPDATE movimientos_credito
+          SET monto = $1,
+              descripcion = descripcion || ' [Ajustado por edicion de pedido]',
+              user_id_modification = $2,
+              date_time_modification = NOW()
+          WHERE id = $3
+        `, [newTotal, userId, cargo.id]);
+
+        // Ajustar saldo del cliente con la diferencia
+        await client.query(`
+          UPDATE customers
+          SET current_balance = current_balance + $1,
+              user_id_modification = $2,
+              date_time_modification = NOW()
+          WHERE id = $3
+        `, [diferencia, userId, cargo.customer_id]);
+
+        console.log('[EDITAR-PEDIDO] CARGO actualizado:', {
+          orderId, cargoId: cargo.id,
+          montoAnterior: oldCargoMonto, montoNuevo: newTotal,
+          diferencia, customerId: cargo.customer_id
+        });
+      }
+    }
+
     await client.query('COMMIT');
 
     // Retornar pedido actualizado
@@ -725,31 +771,81 @@ const updateOrder = async (orderId, items, userId) => {
  * @returns {Promise<Object>} Pedido cancelado
  */
 const cancelOrder = async (orderId, reason, userId) => {
-  // Verificar que el pedido puede ser cancelado
-  const checkQuery = `SELECT id, estado FROM pedidos WHERE id = $1 AND status != 'inactive'`;
-  const checkResult = await pool.query(checkQuery, [orderId]);
+  const client = await pool.connect();
 
-  if (checkResult.rows.length === 0) {
-    throw new Error('Pedido no encontrado');
+  try {
+    await client.query('BEGIN');
+
+    // Verificar que el pedido puede ser cancelado
+    const checkQuery = `SELECT id, estado, customer_id FROM pedidos WHERE id = $1 AND status != 'inactive'`;
+    const checkResult = await client.query(checkQuery, [orderId]);
+
+    if (checkResult.rows.length === 0) {
+      throw new Error('Pedido no encontrado');
+    }
+
+    const currentStatus = checkResult.rows[0].estado;
+    if (!['pendiente', 'en_proceso'].includes(currentStatus)) {
+      throw new Error('Solo se pueden cancelar pedidos en estado pendiente o en_proceso');
+    }
+
+    const customerId = checkResult.rows[0].customer_id;
+
+    // Desactivar cargos de credito asociados al pedido y revertir saldo del cliente
+    const cargosQuery = await client.query(`
+      SELECT id, monto FROM movimientos_credito
+      WHERE pedido_id = $1 AND tipo_movimiento = 'CARGO' AND status = 'active'
+    `, [orderId]);
+
+    if (cargosQuery.rows.length > 0 && customerId) {
+      const totalCargoRevertir = cargosQuery.rows.reduce((sum, c) => sum + parseFloat(c.monto), 0);
+      const cargoIds = cargosQuery.rows.map(c => c.id);
+
+      // Desactivar todos los cargos asociados
+      await client.query(`
+        UPDATE movimientos_credito
+        SET status = 'inactive',
+            descripcion = descripcion || ' [CANCELADO]',
+            user_id_modification = $1,
+            date_time_modification = NOW()
+        WHERE id = ANY($2)
+      `, [userId, cargoIds]);
+
+      // Revertir saldo del cliente
+      await client.query(`
+        UPDATE customers
+        SET current_balance = current_balance - $1,
+            user_id_modification = $2,
+            date_time_modification = NOW()
+        WHERE id = $3
+      `, [totalCargoRevertir, userId, customerId]);
+
+      console.log('[CANCELAR-PEDIDO] Cargos desactivados y saldo revertido:', {
+        orderId, customerId, cargosDesactivados: cargoIds.length, montoRevertido: totalCargoRevertir
+      });
+    }
+
+    // Cancelar el pedido
+    const updateQuery = `
+      UPDATE pedidos
+      SET estado = 'cancelado',
+          observaciones = COALESCE(observaciones || ' | ', '') || 'CANCELADO: ' || $1,
+          user_id_modification = $2,
+          date_time_modification = NOW()
+      WHERE id = $3
+      RETURNING id, estado AS status, date_time_modification AS "cancelledAt"
+    `;
+    const result = await client.query(updateQuery, [reason, userId, orderId]);
+
+    await client.query('COMMIT');
+    return result.rows[0];
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
-
-  const currentStatus = checkResult.rows[0].estado;
-  if (!['pendiente', 'en_proceso'].includes(currentStatus)) {
-    throw new Error('Solo se pueden cancelar pedidos en estado pendiente o en_proceso');
-  }
-
-  const updateQuery = `
-    UPDATE pedidos
-    SET estado = 'cancelado',
-        observaciones = COALESCE(observaciones || ' | ', '') || 'CANCELADO: ' || $1,
-        user_id_modification = $2,
-        date_time_modification = NOW()
-    WHERE id = $3
-    RETURNING id, estado AS status, date_time_modification AS "cancelledAt"
-  `;
-
-  const result = await pool.query(updateQuery, [reason, userId, orderId]);
-  return result.rows[0];
 };
 
 /**
@@ -820,7 +916,7 @@ const deliverOrder = async ({ orderId, paymentType, cashAmount, creditAmount, cr
     const checkPedido = `
       SELECT p.id, p.estado, p.total, p.customer_id, p.tipo_pago,
              c.current_balance, c.credit_days AS customer_credit_days,
-             (SELECT COUNT(*) FROM movimientos_credito mc WHERE mc.pedido_id = p.id AND mc.tipo_movimiento = 'CARGO') AS cargos_existentes
+             (SELECT COUNT(*) FROM movimientos_credito mc WHERE mc.pedido_id = p.id AND mc.tipo_movimiento = 'CARGO' AND mc.status = 'active') AS cargos_existentes
       FROM pedidos p
       LEFT JOIN customers c ON p.customer_id = c.id
       WHERE p.id = $1 AND p.status != 'inactive'

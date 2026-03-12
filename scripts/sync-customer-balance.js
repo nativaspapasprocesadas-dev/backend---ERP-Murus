@@ -15,7 +15,7 @@ async function syncCustomerBalances() {
         u.name as cliente,
         c.current_balance as balance_actual,
         COALESCE(
-          (SELECT SUM(monto) FROM movimientos_credito mc WHERE mc.customer_id = c.id AND mc.tipo_movimiento = 'CARGO' AND mc.status = 'active'), 0
+          (SELECT SUM(monto) FROM movimientos_credito mc WHERE mc.customer_id = c.id AND mc.tipo_movimiento IN ('CARGO', 'SALDO_INICIAL') AND mc.status = 'active'), 0
         ) - COALESCE(
           (SELECT SUM(monto) FROM movimientos_credito mc WHERE mc.customer_id = c.id AND mc.tipo_movimiento = 'ABONO' AND mc.status = 'active'), 0
         ) as deuda_real
@@ -58,7 +58,7 @@ async function syncCustomerBalances() {
       UPDATE customers c
       SET current_balance = (
         COALESCE(
-          (SELECT SUM(monto) FROM movimientos_credito mc WHERE mc.customer_id = c.id AND mc.tipo_movimiento = 'CARGO' AND mc.status = 'active'), 0
+          (SELECT SUM(monto) FROM movimientos_credito mc WHERE mc.customer_id = c.id AND mc.tipo_movimiento IN ('CARGO', 'SALDO_INICIAL') AND mc.status = 'active'), 0
         ) - COALESCE(
           (SELECT SUM(monto) FROM movimientos_credito mc WHERE mc.customer_id = c.id AND mc.tipo_movimiento = 'ABONO' AND mc.status = 'active'), 0
         )

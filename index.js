@@ -167,6 +167,116 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+/**
+ * GET /api/diagnostic/orphan-charges
+ * Detecta CARGOs activos vinculados a pedidos cancelados (datos corruptos)
+ */
+app.get('/api/diagnostic/orphan-charges', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        mc.id AS movimiento_id,
+        mc.pedido_id,
+        mc.customer_id,
+        mc.monto,
+        mc.status AS status_movimiento,
+        mc.descripcion,
+        mc.fecha_movimiento,
+        p.numero_pedido,
+        p.estado AS estado_pedido,
+        p.total AS total_pedido,
+        u.name AS cliente_nombre
+      FROM movimientos_credito mc
+      JOIN pedidos p ON mc.pedido_id = p.id
+      LEFT JOIN customers c ON mc.customer_id = c.id
+      LEFT JOIN users u ON c.user_id = u.id
+      WHERE mc.tipo_movimiento = 'CARGO'
+        AND mc.status = 'active'
+        AND p.estado = 'cancelado'
+      ORDER BY mc.customer_id, mc.id
+    `);
+
+    const totalMonto = result.rows.reduce((sum, r) => sum + parseFloat(r.monto), 0);
+    const clientesAfectados = [...new Set(result.rows.map(r => r.customer_id))];
+
+    res.json({
+      encontrados: result.rows.length,
+      totalMonto,
+      clientesAfectados: clientesAfectados.length,
+      detalle: result.rows
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/diagnostic/fix-orphan-charges
+ * Desactiva CARGOs huerfanos y re-sincroniza balances
+ */
+app.post('/api/diagnostic/fix-orphan-charges', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    // Detectar huerfanos
+    const orphans = await client.query(`
+      SELECT mc.id, mc.monto, mc.customer_id
+      FROM movimientos_credito mc
+      JOIN pedidos p ON mc.pedido_id = p.id
+      WHERE mc.tipo_movimiento = 'CARGO'
+        AND mc.status = 'active'
+        AND p.estado = 'cancelado'
+    `);
+
+    if (orphans.rows.length === 0) {
+      return res.json({ message: 'No hay cargos huerfanos. Todo limpio.', fixed: 0 });
+    }
+
+    await client.query('BEGIN');
+
+    const movIds = orphans.rows.map(r => r.id);
+    const customerIds = [...new Set(orphans.rows.map(r => r.customer_id))];
+
+    // Desactivar cargos
+    await client.query(`
+      UPDATE movimientos_credito
+      SET status = 'inactive',
+          descripcion = descripcion || ' [CANCELADO - fix auto]',
+          date_time_modification = NOW()
+      WHERE id = ANY($1)
+    `, [movIds]);
+
+    // Re-sincronizar balances
+    await client.query(`
+      UPDATE customers c
+      SET current_balance = (
+        COALESCE(
+          (SELECT SUM(monto) FROM movimientos_credito mc
+           WHERE mc.customer_id = c.id AND mc.tipo_movimiento IN ('CARGO', 'SALDO_INICIAL') AND mc.status = 'active'), 0
+        ) - COALESCE(
+          (SELECT SUM(monto) FROM movimientos_credito mc
+           WHERE mc.customer_id = c.id AND mc.tipo_movimiento = 'ABONO' AND mc.status = 'active'), 0
+        )
+      ),
+      date_time_modification = NOW()
+      WHERE c.id = ANY($1)
+    `, [customerIds]);
+
+    await client.query('COMMIT');
+
+    res.json({
+      message: 'Correccion aplicada exitosamente',
+      cargosDesactivados: movIds.length,
+      clientesCorregidos: customerIds.length,
+      totalMontoCorregido: orphans.rows.reduce((sum, r) => sum + parseFloat(r.monto), 0)
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
 // ============================================================================
 // CREAR SERVIDOR HTTP + SOCKET.IO
 // ============================================================================

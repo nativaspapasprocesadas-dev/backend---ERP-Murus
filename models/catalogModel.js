@@ -5,15 +5,18 @@
  */
 const pool = require('../config/db');
 
+const DEFAULT_PAGE_SIZE = 20;
+const MAX_PAGE_SIZE = 500;
+
 /**
  * Listar productos del catalogo con paginacion y filtros - API-014
  * @param {Object} params - Parametros de filtro y paginacion
  * @param {boolean} params.includeHidden - Si es true, incluye productos no visibles en catálogo (para uso administrativo)
  * @returns {Promise<Object>} Lista paginada de productos
  */
-const listProducts = async ({ page = 1, pageSize = 20, speciesId, measureId, customerId, includeHidden = false }) => {
-  // Validar pageSize maximo 100
-  pageSize = Math.min(parseInt(pageSize) || 20, 100);
+const listProducts = async ({ page = 1, pageSize = DEFAULT_PAGE_SIZE, speciesId, measureId, customerId, includeHidden = false }) => {
+  const parsedSize = parseInt(pageSize);
+  pageSize = parsedSize === 0 ? MAX_PAGE_SIZE : Math.min(parsedSize || DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE);
   page = parseInt(page) || 1;
   const offset = (page - 1) * pageSize;
 
