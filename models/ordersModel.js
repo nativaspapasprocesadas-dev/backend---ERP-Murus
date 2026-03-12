@@ -87,7 +87,7 @@ const listOrders = async ({ page = 1, pageSize = 20, status, customerId, branchI
       p.branch_id AS "branchId",
       p.ruta_diaria_id AS "rutaDiariaId",
       c.id AS "customerId",
-      COALESCE(c.contact_name, u.name) AS "customerName",
+      u.name AS "customerName",
       u.email AS "customerEmail",
       c.customer_type AS "customerType",
       rc.nombre AS "rutaNombre",
