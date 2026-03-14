@@ -103,7 +103,7 @@ const getClientCreditAccount = async (userId, { page = 1, pageSize = 20 }) => {
  * @param {Object} params - Filtros y paginacion
  * @returns {Promise<Object>} Lista paginada de deudores
  */
-const getDebtors = async ({ page = 1, pageSize = 20, branchId, hasOverdue }) => {
+const getDebtors = async ({ page = 1, pageSize = 20, branchId, hasOverdue, search }) => {
   pageSize = Math.min(parseInt(pageSize) || 20, 100);
   page = parseInt(page) || 1;
   const offset = (page - 1) * pageSize;
@@ -127,6 +127,13 @@ const getDebtors = async ({ page = 1, pageSize = 20, branchId, hasOverdue }) => 
       OR (c.route_id IS NULL AND u.branch_id = $${paramIndex})
     )`);
     params.push(branchId);
+    paramIndex++;
+  }
+
+  // Filtro por búsqueda de nombre de cliente
+  if (search && search.trim()) {
+    whereConditions.push(`u.name ILIKE $${paramIndex}`);
+    params.push(`%${search.trim()}%`);
     paramIndex++;
   }
 
@@ -245,6 +252,47 @@ const getDebtors = async ({ page = 1, pageSize = 20, branchId, hasOverdue }) => 
     canSendReminder: row.routeStartedToday === true
   }));
 
+  // Resumen global (sin paginación ni búsqueda) para estadísticas reales
+  const summaryParams = [];
+  let summaryBranchCondition = '';
+  if (branchId) {
+    summaryParams.push(branchId);
+    summaryBranchCondition = `AND (
+      (c.route_id IS NOT NULL AND EXISTS (SELECT 1 FROM rutas_config rc WHERE rc.id = c.route_id AND rc.branch_id = $1))
+      OR (c.route_id IS NULL AND u.branch_id = $1)
+    )`;
+  }
+  const summaryQuery = `
+    SELECT
+      COUNT(*) AS total_deudores,
+      COALESCE(SUM(sub.debt), 0) AS total_debt,
+      COUNT(*) FILTER (WHERE sub.has_overdue) AS total_con_vencidos
+    FROM (
+      SELECT
+        c.id,
+        COALESCE(
+          (SELECT SUM(monto) FROM movimientos_credito mc WHERE mc.customer_id = c.id AND mc.tipo_movimiento IN ('CARGO', 'SALDO_INICIAL') AND mc.status = 'active'), 0
+        ) - COALESCE(
+          (SELECT SUM(monto) FROM movimientos_credito mc WHERE mc.customer_id = c.id AND mc.tipo_movimiento = 'ABONO' AND mc.status = 'active'), 0
+        ) AS debt,
+        EXISTS (
+          SELECT 1 FROM movimientos_credito mc_v
+          WHERE mc_v.customer_id = c.id
+            AND mc_v.tipo_movimiento = 'CARGO'
+            AND mc_v.status = 'active'
+            AND mc_v.fecha_vencimiento IS NOT NULL
+            AND mc_v.fecha_vencimiento < NOW()
+        ) AS has_overdue
+      FROM customers c
+      LEFT JOIN users u ON c.user_id = u.id
+      WHERE c.status = 'active'
+      ${summaryBranchCondition}
+    ) sub
+    WHERE sub.debt > 0
+  `;
+  const summaryResult = await pool.query(summaryQuery, summaryParams);
+  const summary = summaryResult.rows[0];
+
   return {
     data,
     pagination: {
@@ -252,6 +300,11 @@ const getDebtors = async ({ page = 1, pageSize = 20, branchId, hasOverdue }) => 
       page,
       pageSize,
       totalPages: Math.ceil(total / pageSize)
+    },
+    summary: {
+      totalDeudores: parseInt(summary.total_deudores) || 0,
+      totalDebt: parseFloat(summary.total_debt) || 0,
+      totalConVencidos: parseInt(summary.total_con_vencidos) || 0
     }
   };
 };

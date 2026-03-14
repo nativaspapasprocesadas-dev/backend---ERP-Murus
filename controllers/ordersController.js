@@ -56,7 +56,7 @@ const list = async (req, res) => {
       return res.status(401).json({ success: false, error: 'Token invalido o expirado' });
     }
 
-    const { page, pageSize, status, customerId, branchId, dateFrom, dateTo } = req.query;
+    const { page, pageSize, status, customerId, branchId, dateFrom, dateTo, search } = req.query;
 
     // SUPERADMINISTRADOR sin branchId ve todas las sedes
     // Otros roles usan su branch_id del token
@@ -76,7 +76,8 @@ const list = async (req, res) => {
       dateFrom,
       dateTo,
       userId: decoded.id,
-      roleName: decoded.role_name
+      roleName: decoded.role_name,
+      search: search || null
     });
 
     // Response segun diseno API-006
@@ -122,7 +123,11 @@ const stats = async (req, res) => {
       pendientes: result.pendientes,
       enProceso: result.enProceso,
       completados: result.completados,
-      cancelados: result.cancelados
+      cancelados: result.cancelados,
+      despachoRuta: result.despachoRuta,
+      despachoTaxi: result.despachoTaxi,
+      despachoRecojo: result.despachoRecojo,
+      despachoOtro: result.despachoOtro
     });
 
   } catch (error) {
@@ -191,7 +196,8 @@ const create = async (req, res) => {
       orderType,
       estimatedDeliveryDate,
       isPrepaid,
-      assignRoute // Flag para asignar ruta automaticamente (solo si es Delivery Propio)
+      assignRoute, // Flag para asignar ruta automaticamente (solo si es Delivery Propio)
+      tipoDespacho // Tipo de despacho: RUTA, TAXI, RECOJO, OTRO
     } = req.body;
 
     // Validaciones segun diseno API-009
@@ -208,6 +214,11 @@ const create = async (req, res) => {
     // Validar orderType si se proporciona
     if (orderType && !['NORMAL', 'ADICIONAL'].includes(orderType)) {
       return res.status(400).json({ success: false, error: 'orderType debe ser NORMAL o ADICIONAL' });
+    }
+
+    // Validar tipoDespacho si se proporciona
+    if (tipoDespacho && !['RUTA', 'TAXI', 'RECOJO', 'OTRO'].includes(tipoDespacho)) {
+      return res.status(400).json({ success: false, error: 'tipoDespacho debe ser RUTA, TAXI, RECOJO u OTRO' });
     }
 
     // Validar observations para pedidos ADICIONALES (min 10 caracteres)
@@ -281,7 +292,8 @@ const create = async (req, res) => {
       isPrepaid: isPrepaid || false,
       assignRoute: assignRoute === true, // Solo asignar ruta si explicitamente es true
       branchId: effectiveBranchId,
-      userId: decoded.id
+      userId: decoded.id,
+      tipoDespacho: tipoDespacho || 'RUTA'
     });
 
     // Emitir evento Socket.IO para actualizar pizarra en tiempo real

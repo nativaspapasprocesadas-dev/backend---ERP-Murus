@@ -35,13 +35,16 @@ const getReportsSummary = async ({ dateFrom, dateTo, branchId }) => {
   const whereClause = 'WHERE ' + whereConditions.join(' AND ');
 
   // Query para totales generales
+  // Fuente de verdad: pedido_detalles (subtotal_linea para montos, cantidad * peso para kilos)
   const totalsQuery = `
     SELECT
       COUNT(DISTINCT p.id) AS total_orders,
-      COALESCE(SUM(pd.cantidad), 0) AS total_kilos,
-      COALESCE(SUM(p.total), 0) AS total_amount
+      COALESCE(SUM(pd.cantidad * COALESCE(pres.peso, 1)), 0) AS total_kilos,
+      COALESCE(SUM(pd.subtotal_linea), 0) AS total_amount
     FROM pedidos p
     LEFT JOIN pedido_detalles pd ON p.id = pd.pedido_id AND pd.status = 'active'
+    LEFT JOIN productos prod ON pd.producto_id = prod.id
+    LEFT JOIN presentaciones pres ON prod.presentacion_id = pres.id
     ${whereClause}
   `;
   const totalsResult = await pool.query(totalsQuery, params);
@@ -405,11 +408,11 @@ const getRoutesReport = async ({ dateFrom, dateTo, branchId }) => {
       ch.telefono AS chofer_telefono,
       COUNT(DISTINCT p.id) AS order_count,
       COALESCE(SUM(pd.cantidad * COALESCE(pres.peso, 1)), 0) AS total_kilos,
-      COALESCE((SELECT SUM(sub_p.total) FROM pedidos sub_p WHERE sub_p.ruta_diaria_id = rd.id AND sub_p.status = 'active'), 0) AS total_amount
+      COALESCE((SELECT SUM(sub_p.total) FROM pedidos sub_p WHERE sub_p.ruta_diaria_id = rd.id AND sub_p.status = 'active' AND sub_p.estado != 'cancelado'), 0) AS total_amount
     FROM rutas_diarias rd
     JOIN rutas_config rc ON rd.ruta_config_id = rc.id
     LEFT JOIN choferes ch ON rd.chofer_id = ch.id
-    LEFT JOIN pedidos p ON p.ruta_diaria_id = rd.id AND p.status = 'active'
+    LEFT JOIN pedidos p ON p.ruta_diaria_id = rd.id AND p.status = 'active' AND p.estado != 'cancelado'
     LEFT JOIN pedido_detalles pd ON p.id = pd.pedido_id AND pd.status = 'active'
     LEFT JOIN productos prod ON pd.producto_id = prod.id
     LEFT JOIN presentaciones pres ON prod.presentacion_id = pres.id
@@ -418,6 +421,7 @@ const getRoutesReport = async ({ dateFrom, dateTo, branchId }) => {
              rd.id, rd.estado, rd.fecha, rd.hora_inicio, rd.hora_fin,
              rd.kilometraje_inicio, rd.kilometraje_fin, rd.observaciones,
              rd.chofer_id, ch.nombre, ch.telefono
+    HAVING COUNT(DISTINCT p.id) > 0
     ORDER BY rd.fecha DESC, rc.nombre ASC
   `;
 
@@ -445,7 +449,7 @@ const getRoutesReport = async ({ dateFrom, dateTo, branchId }) => {
       FROM pedidos p
       LEFT JOIN customers c ON p.customer_id = c.id
       LEFT JOIN users u ON c.user_id = u.id
-      WHERE p.ruta_diaria_id = ANY($1) AND p.status = 'active'
+      WHERE p.ruta_diaria_id = ANY($1) AND p.status = 'active' AND p.estado != 'cancelado'
       ORDER BY p.ruta_diaria_id, p.numero_pedido
     `;
     const ordersResult = await pool.query(ordersQuery, [dailyIds]);
@@ -478,7 +482,7 @@ const getRoutesReport = async ({ dateFrom, dateTo, branchId }) => {
       JOIN productos prod ON pd.producto_id = prod.id
       LEFT JOIN especies esp ON prod.especie_id = esp.id
       LEFT JOIN presentaciones pres ON prod.presentacion_id = pres.id
-      WHERE p.ruta_diaria_id = ANY($1) AND p.status = 'active' AND pd.status = 'active'
+      WHERE p.ruta_diaria_id = ANY($1) AND p.status = 'active' AND p.estado != 'cancelado' AND pd.status = 'active'
       GROUP BY p.ruta_diaria_id, prod.nombre, esp.nombre
       ORDER BY p.ruta_diaria_id, total_kilos DESC
     `;
@@ -561,14 +565,16 @@ const getKilosBySpeciesReport = async ({ dateFrom, dateTo, speciesId, branchId, 
   const whereClause = 'WHERE ' + whereConditions.join(' AND ');
 
   // Query para total general (kilos y pedidos)
+  // Fuente de verdad: cantidad * peso de presentacion = kilos reales
   const totalQuery = `
     SELECT
-      COALESCE(SUM(pd.cantidad), 0) AS total_kilos,
+      COALESCE(SUM(pd.cantidad * COALESCE(pres.peso, 1)), 0) AS total_kilos,
       COUNT(DISTINCT p.id) AS total_orders
     FROM pedidos p
     JOIN pedido_detalles pd ON p.id = pd.pedido_id AND pd.status = 'active'
     JOIN productos pr ON pd.producto_id = pr.id
     JOIN especies e ON pr.especie_id = e.id
+    LEFT JOIN presentaciones pres ON pr.presentacion_id = pres.id
     ${whereClause}
   `;
   const totalResult = await pool.query(totalQuery, params);
@@ -580,11 +586,12 @@ const getKilosBySpeciesReport = async ({ dateFrom, dateTo, speciesId, branchId, 
     SELECT
       e.id,
       e.nombre AS species,
-      COALESCE(SUM(pd.cantidad), 0) AS kilos
+      COALESCE(SUM(pd.cantidad * COALESCE(pres.peso, 1)), 0) AS kilos
     FROM pedidos p
     JOIN pedido_detalles pd ON p.id = pd.pedido_id AND pd.status = 'active'
     JOIN productos pr ON pd.producto_id = pr.id
     JOIN especies e ON pr.especie_id = e.id
+    LEFT JOIN presentaciones pres ON pr.presentacion_id = pres.id
     ${whereClause}
     GROUP BY e.id, e.nombre
     ORDER BY kilos DESC
@@ -610,11 +617,12 @@ const getKilosBySpeciesReport = async ({ dateFrom, dateTo, speciesId, branchId, 
         DATE(p.fecha_pedido) AS fecha,
         e.id AS especie_id,
         e.nombre AS especie,
-        COALESCE(SUM(pd.cantidad), 0) AS kilos
+        COALESCE(SUM(pd.cantidad * COALESCE(pres.peso, 1)), 0) AS kilos
       FROM pedidos p
       JOIN pedido_detalles pd ON p.id = pd.pedido_id AND pd.status = 'active'
       JOIN productos pr ON pd.producto_id = pr.id
       JOIN especies e ON pr.especie_id = e.id
+      LEFT JOIN presentaciones pres ON pr.presentacion_id = pres.id
       ${whereClause}
       GROUP BY DATE(p.fecha_pedido), e.id, e.nombre
       ORDER BY fecha DESC, especie ASC

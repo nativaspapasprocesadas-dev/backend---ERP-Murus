@@ -85,20 +85,22 @@ const listDebtors = async (req, res) => {
       return res.status(403).json({ success: false, error: 'No tiene permisos para acceder a esta informacion' });
     }
 
-    const { page, pageSize, branchId, hasOverdue } = req.query;
+    const { page, pageSize, branchId, hasOverdue, search } = req.query;
 
     const result = await getDebtors({
       page: page ? parseInt(page) : 1,
       pageSize: pageSize ? parseInt(pageSize) : 20,
       branchId: branchId ? parseInt(branchId) : (decoded.role_name?.toLowerCase() !== 'superadministrador' ? decoded.branch_id : null),
-      hasOverdue
+      hasOverdue,
+      search
     });
 
     // Response segun diseno API-022
     res.json({
       success: true,
       data: result.data,
-      pagination: result.pagination
+      pagination: result.pagination,
+      summary: result.summary
     });
 
   } catch (error) {

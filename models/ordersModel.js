@@ -11,7 +11,7 @@ const { getPeruTimeString, getPeruDate, getPeruDateTomorrow, getPeruDateString }
  * @param {Object} params - Parametros de filtro y paginacion
  * @returns {Promise<Object>} Lista paginada de pedidos
  */
-const listOrders = async ({ page = 1, pageSize = 20, status, customerId, branchId, dateFrom, dateTo, userId, roleName }) => {
+const listOrders = async ({ page = 1, pageSize = 20, status, customerId, branchId, dateFrom, dateTo, userId, roleName, search }) => {
   // pageSize=0 significa sin limite (retornar todos los registros)
   const parsedPageSize = parseInt(pageSize);
   const allRecords = parsedPageSize === 0;
@@ -58,13 +58,19 @@ const listOrders = async ({ page = 1, pageSize = 20, status, customerId, branchI
     params.push(dateTo);
     paramIndex++;
   }
+  if (search) {
+    whereConditions.push(`u.name ILIKE $${paramIndex}`);
+    params.push(`%${search}%`);
+    paramIndex++;
+  }
 
   const whereClause = whereConditions.length > 0 ? 'WHERE ' + whereConditions.join(' AND ') : '';
 
-  // Query para contar total
+  // Query para contar total (incluye JOINs necesarios para filtro por nombre de cliente)
   const countQuery = `
     SELECT COUNT(*) AS total
     FROM pedidos p
+    ${search ? 'LEFT JOIN customers c ON p.customer_id = c.id LEFT JOIN users u ON c.user_id = u.id' : ''}
     ${whereClause}
   `;
   const countResult = await pool.query(countQuery, params);
@@ -80,6 +86,7 @@ const listOrders = async ({ page = 1, pageSize = 20, status, customerId, branchI
       p.estado AS status,
       p.tipo_pedido AS "tipoPedido",
       p.tipo_pago AS "tipoPago",
+      p.tipo_despacho AS "tipoDespacho",
       p.subtotal,
       p.total,
       p.observaciones AS observations,
@@ -127,6 +134,7 @@ const listOrders = async ({ page = 1, pageSize = 20, status, customerId, branchI
       status: row.status,
       tipoPedido: row.tipoPedido,
       tipoPago: row.tipoPago,
+      tipoDespacho: row.tipoDespacho || 'RUTA',
       total: parseFloat(row.total) || 0,
       subtotal: parseFloat(row.subtotal) || 0,
       createdAt: row.createdAt,
@@ -186,7 +194,11 @@ const getOrdersStats = async ({ branchId, date, userId, roleName }) => {
       COUNT(*) FILTER (WHERE estado = 'pendiente') AS pendientes,
       COUNT(*) FILTER (WHERE estado = 'en_proceso') AS "enProceso",
       COUNT(*) FILTER (WHERE estado = 'completado') AS completados,
-      COUNT(*) FILTER (WHERE estado = 'cancelado') AS cancelados
+      COUNT(*) FILTER (WHERE estado = 'cancelado') AS cancelados,
+      COUNT(*) FILTER (WHERE tipo_despacho = 'RUTA' OR tipo_despacho IS NULL) AS "despachoRuta",
+      COUNT(*) FILTER (WHERE tipo_despacho = 'TAXI') AS "despachoTaxi",
+      COUNT(*) FILTER (WHERE tipo_despacho = 'RECOJO') AS "despachoRecojo",
+      COUNT(*) FILTER (WHERE tipo_despacho = 'OTRO') AS "despachoOtro"
     FROM pedidos
     ${whereClause}
   `;
@@ -199,7 +211,11 @@ const getOrdersStats = async ({ branchId, date, userId, roleName }) => {
     pendientes: parseInt(row.pendientes) || 0,
     enProceso: parseInt(row.enProceso) || 0,
     completados: parseInt(row.completados) || 0,
-    cancelados: parseInt(row.cancelados) || 0
+    cancelados: parseInt(row.cancelados) || 0,
+    despachoRuta: parseInt(row.despachoRuta) || 0,
+    despachoTaxi: parseInt(row.despachoTaxi) || 0,
+    despachoRecojo: parseInt(row.despachoRecojo) || 0,
+    despachoOtro: parseInt(row.despachoOtro) || 0
   };
 };
 
@@ -217,6 +233,7 @@ const getOrderById = async (orderId) => {
       p.correlativo_sede AS "correlativoSede",
       p.estado AS status,
       p.tipo_pedido AS "tipoPedido",
+      p.tipo_despacho AS "tipoDespacho",
       p.subtotal,
       p.total,
       p.observaciones AS observations,
@@ -319,6 +336,7 @@ const getOrderById = async (orderId) => {
     },
     status: order.status,
     tipoPedido: order.tipoPedido,
+    tipoDespacho: order.tipoDespacho || 'RUTA',
     route: order.rutaDiariaId ? {
       id: order.rutaDiariaId,
       name: order.rutaNombre
@@ -360,7 +378,8 @@ const createOrder = async ({
   assignRoute,
   branchId,
   userId,
-  voucherUrl
+  voucherUrl,
+  tipoDespacho
 }) => {
   const client = await pool.connect();
 
@@ -487,10 +506,10 @@ const createOrder = async ({
     const insertOrderQuery = `
       INSERT INTO pedidos (
         numero_pedido, correlativo_sede, customer_id, branch_id, user_id_vendedor, fecha_pedido, fecha_entrega,
-        estado, tipo_pedido, subtotal, descuento, total, observaciones, voucher_url,
+        estado, tipo_pedido, tipo_despacho, subtotal, descuento, total, observaciones, voucher_url,
         estado_pago, tipo_pago, user_id_registration
       )
-      VALUES ($1, $2, $3, $4, $5, NOW(), $6, 'pendiente', $7, $8, 0, $9, $10, $11, $12, $13, $5)
+      VALUES ($1, $2, $3, $4, $5, NOW(), $6, 'pendiente', $7, $14, $8, 0, $9, $10, $11, $12, $13, $5)
       RETURNING id, numero_pedido, correlativo_sede, estado, total, date_time_registration
     `;
     const orderResult = await client.query(insertOrderQuery, [
@@ -506,7 +525,8 @@ const createOrder = async ({
       finalObservations,
       voucherUrl || null,
       voucherUrl ? 'PENDIENTE' : null,
-      tipoPago
+      tipoPago,
+      tipoDespacho || 'RUTA'
     ]);
 
     const orderId = orderResult.rows[0].id;
@@ -634,7 +654,8 @@ const createOrder = async ({
       creditMovementId: creditMovementId,
       cargadoACredito: creditMovementId !== null,
       agendadoParaManana: agendadoParaManana,
-      fechaEntrega: fechaEntrega // Ya es string YYYY-MM-DD
+      fechaEntrega: fechaEntrega, // Ya es string YYYY-MM-DD
+      tipoDespacho: tipoDespacho || 'RUTA'
     };
 
   } catch (error) {

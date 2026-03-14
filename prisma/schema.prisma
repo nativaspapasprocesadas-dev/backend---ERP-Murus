@@ -300,6 +300,7 @@ model pedidos {
   fecha_entrega          DateTime?             @db.Date
   estado                 String                @default("pendiente") @db.VarChar(30)
   tipo_pedido            String                @default("normal") @db.VarChar(20)
+  tipo_despacho          String?               @default("RUTA") @db.VarChar(20)
   subtotal               Decimal               @db.Decimal(12, 2)
   descuento              Decimal?              @default(0) @db.Decimal(12, 2)
   total                  Decimal               @db.Decimal(12, 2)
@@ -329,6 +330,7 @@ model pedidos {
   @@index([estado_pago], map: "idx_pedidos_estado_pago")
   @@index([tipo_pago], map: "idx_pedidos_tipo_pago")
   @@index([branch_id, correlativo_sede], map: "idx_pedidos_branch_correlativo")
+  @@index([tipo_despacho], map: "idx_pedidos_tipo_despacho")
 }
 
 model pedido_detalles {
