@@ -154,8 +154,8 @@ const getRoutes = async (req, res) => {
       }
       const diffTime = Math.abs(new Date(dateTo) - new Date(dateFrom));
       const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-      if (diffDays > 90) {
-        return res.status(400).json({ success: false, error: 'El rango maximo es de 90 dias' });
+      if (diffDays > 365) {
+        return res.status(400).json({ success: false, error: 'El rango maximo es de 365 dias' });
       }
     }
 
