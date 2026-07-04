@@ -157,7 +157,7 @@ const createProduct = async ({ speciesId, measureId, presentationId, basePrice, 
   const checkResult = await pool.query(checkCombination, [speciesId, measureId, presentationId]);
 
   if (checkResult.rows.length > 0) {
-    throw new Error('Ya existe un producto con esta combinacion de especie, medida y presentacion');
+    throw new Error('Ya existe un producto con esta combinacion de especie, tipo de corte y empaquetado');
   }
 
   // Obtener nombres para generar nombre automatico si no se proporciona

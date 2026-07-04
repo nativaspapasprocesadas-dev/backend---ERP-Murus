@@ -6,9 +6,29 @@ const {
   getClientCreditAccount,
   getDebtors,
   getCustomerCreditAccount,
+  getDebtorsForExport,
   sendPaymentReminder
 } = require('../models/creditsModel');
 const jwt = require('jsonwebtoken');
+const XLSX = require('xlsx');
+const { getPeruDateString } = require('../utils/dateUtils');
+
+/**
+ * Formatea una fecha de la BD a texto legible "YYYY-MM-DD HH:mm" (hora local del servidor/BD)
+ */
+const formatFechaExcel = (date) => {
+  if (!date) return '';
+  const d = date instanceof Date ? date : new Date(date);
+  if (isNaN(d.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+
+const TIPO_MOVIMIENTO_LABEL = {
+  CARGO: 'Cargo',
+  ABONO: 'Abono',
+  SALDO_INICIAL: 'Saldo Inicial'
+};
 
 /**
  * Decodificar token JWT
@@ -158,6 +178,98 @@ const getCustomerAccount = async (req, res) => {
 };
 
 /**
+ * GET /api/v1/credits/debtors/export
+ * Exportar a Excel los créditos de los clientes con deuda y su detalle de movimientos
+ * Roles permitidos: SUPERADMINISTRADOR, ADMINISTRADOR, COORDINADOR
+ */
+const exportDebtors = async (req, res) => {
+  try {
+    const decoded = decodeToken(req);
+    if (!decoded) {
+      return res.status(401).json({ success: false, error: 'Token invalido o expirado' });
+    }
+
+    const allowedRoles = ['superadministrador', 'administrador', 'coordinador'];
+    if (!allowedRoles.includes(decoded.role_name?.toLowerCase())) {
+      return res.status(403).json({ success: false, error: 'No tiene permisos para exportar esta informacion' });
+    }
+
+    const { branchId, search } = req.query;
+    // Superadmin puede ver todas las sedes; los demás quedan restringidos a la suya
+    const resolvedBranchId = branchId
+      ? parseInt(branchId)
+      : (decoded.role_name?.toLowerCase() !== 'superadministrador' ? decoded.branch_id : null);
+
+    const { debtors, movements } = await getDebtorsForExport({
+      branchId: resolvedBranchId,
+      search
+    });
+
+    // Hoja 1: Resumen de clientes con deuda
+    const resumenRows = debtors.map(d => ({
+      'Cliente': d.customerName,
+      'Teléfono': d.phone || '',
+      'Días de crédito': d.creditDays,
+      'N° movimientos': d.movementCount,
+      'Cargos vencidos': d.overdueCharges,
+      'Último abono': formatFechaExcel(d.lastPaymentDate),
+      'Saldo pendiente (S/)': d.totalDebt
+    }));
+
+    // Fila de totales al final del resumen
+    const totalDeuda = debtors.reduce((acc, d) => acc + d.totalDebt, 0);
+    resumenRows.push({
+      'Cliente': 'TOTAL',
+      'Teléfono': '',
+      'Días de crédito': '',
+      'N° movimientos': '',
+      'Cargos vencidos': '',
+      'Último abono': '',
+      'Saldo pendiente (S/)': totalDeuda
+    });
+
+    // Hoja 2: Detalle de movimientos (cargos y abonos) por cliente
+    const detalleRows = movements.map(m => ({
+      'Cliente': m.customerName,
+      'Fecha': formatFechaExcel(m.fechaMovimiento),
+      'Tipo': TIPO_MOVIMIENTO_LABEL[m.tipo] || m.tipo,
+      'Referencia': m.referencia,
+      'Cargo (S/)': m.tipo === 'ABONO' ? '' : m.monto,
+      'Abono (S/)': m.tipo === 'ABONO' ? m.monto : '',
+      'Saldo (S/)': m.saldo,
+      'Vencimiento': formatFechaExcel(m.fechaVencimiento),
+      'Vencido': m.tipo === 'CARGO' && m.esVencido ? 'SÍ' : '',
+      'Notas': m.notas || ''
+    }));
+
+    const wb = XLSX.utils.book_new();
+
+    const wsResumen = XLSX.utils.json_to_sheet(resumenRows.length > 0 ? resumenRows : [{ 'Cliente': 'Sin clientes con deuda' }]);
+    wsResumen['!cols'] = [
+      { wch: 30 }, { wch: 15 }, { wch: 14 }, { wch: 14 }, { wch: 15 }, { wch: 18 }, { wch: 20 }
+    ];
+    XLSX.utils.book_append_sheet(wb, wsResumen, 'Resumen');
+
+    const wsDetalle = XLSX.utils.json_to_sheet(detalleRows.length > 0 ? detalleRows : [{ 'Cliente': 'Sin movimientos' }]);
+    wsDetalle['!cols'] = [
+      { wch: 30 }, { wch: 18 }, { wch: 13 }, { wch: 28 }, { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 18 }, { wch: 9 }, { wch: 30 }
+    ];
+    XLSX.utils.book_append_sheet(wb, wsDetalle, 'Detalle de Movimientos');
+
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const filename = `creditos_clientes_${getPeruDateString()}.xlsx`;
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.send(buffer);
+
+  } catch (error) {
+    console.error('Error exportando créditos:', error);
+    res.status(500).json({ success: false, error: 'Error interno del servidor al exportar créditos' });
+  }
+};
+
+/**
  * POST /api/v1/credits/customers/:customerId/reminder - API-024
  * Enviar recordatorio de pago
  * Roles permitidos: SUPERADMINISTRADOR, ADMINISTRADOR, COORDINADOR
@@ -206,5 +318,6 @@ module.exports = {
   getAccount,
   listDebtors,
   getCustomerAccount,
+  exportDebtors,
   sendReminder
 };

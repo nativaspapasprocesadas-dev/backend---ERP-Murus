@@ -8,12 +8,17 @@ const {
   getAccount,
   listDebtors,
   getCustomerAccount,
+  exportDebtors,
   sendReminder
 } = require('../controllers/creditsController');
 
 // GET /api/v1/credits/account - API-021
 // Estado de cuenta del cliente autenticado
 router.get('/account', getAccount);
+
+// GET /api/v1/credits/debtors/export
+// Exportar a Excel los créditos de los clientes con su detalle
+router.get('/debtors/export', exportDebtors);
 
 // GET /api/v1/credits/debtors - API-022
 // Listar clientes con deuda

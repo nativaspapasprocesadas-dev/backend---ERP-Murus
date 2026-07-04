@@ -10,6 +10,7 @@ const {
   getRoutes,
   getKilosBySpecies,
   getCustomers,
+  getCustomerConsumption,
   exportCustomers
 } = require('../controllers/reportsController');
 
@@ -24,6 +25,9 @@ router.get('/routes', getRoutes);
 
 // GET /api/v1/reports/kilos-by-species - API-064
 router.get('/kilos-by-species', getKilosBySpecies);
+
+// GET /api/v1/reports/customers/consumption - API-065b (detallado de consumo por día)
+router.get('/customers/consumption', getCustomerConsumption);
 
 // GET /api/v1/reports/customers/export - API-066 (debe ir antes de /customers para evitar conflicto con :id)
 router.get('/customers/export', exportCustomers);

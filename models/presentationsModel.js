@@ -70,7 +70,7 @@ const createPresentation = async ({ name, description, weight, isActive, userId 
   const checkResult = await pool.query(checkQuery, [name]);
 
   if (checkResult.rows.length > 0) {
-    throw new Error('Ya existe una presentacion con ese nombre');
+    throw new Error('Ya existe un empaquetado con ese nombre');
   }
 
   // Determinar el status inicial basado en isActive (por defecto true)
@@ -112,7 +112,7 @@ const updatePresentation = async (id, { name, description, weight, isActive, use
   const checkResult = await pool.query(checkQuery, [id]);
 
   if (checkResult.rows.length === 0) {
-    throw new Error('Presentacion no encontrada');
+    throw new Error('Empaquetado no encontrado');
   }
 
   // Si se cambia el nombre, verificar que no exista otra con el mismo nombre
@@ -120,7 +120,7 @@ const updatePresentation = async (id, { name, description, weight, isActive, use
     const duplicateCheck = `SELECT id FROM presentaciones WHERE LOWER(nombre) = LOWER($1) AND id != $2 AND status = 'active'`;
     const duplicateResult = await pool.query(duplicateCheck, [name, id]);
     if (duplicateResult.rows.length > 0) {
-      throw new Error('Ya existe otra presentacion con ese nombre');
+      throw new Error('Ya existe otro empaquetado con ese nombre');
     }
   }
 
@@ -190,14 +190,14 @@ const deletePresentation = async (id, userId) => {
   const checkResult = await pool.query(checkQuery, [id]);
 
   if (checkResult.rows.length === 0) {
-    throw new Error('Presentacion no encontrada');
+    throw new Error('Empaquetado no encontrado');
   }
 
   const presentationName = checkResult.rows[0].nombre;
 
   // Si ya está eliminada, no hacer nada
   if (checkResult.rows[0].status === 'deleted') {
-    return { success: true, message: 'La presentacion ya estaba eliminada' };
+    return { success: true, message: 'El empaquetado ya estaba eliminado' };
   }
 
   // Verificar que no tenga productos asociados (activos o inactivos)
@@ -210,7 +210,7 @@ const deletePresentation = async (id, userId) => {
   const productCount = parseInt(productsResult.rows[0].count);
 
   if (productCount > 0) {
-    throw new Error(`No se puede eliminar la presentación "${presentationName}" porque tiene ${productCount} producto(s) asociado(s). Primero debe eliminar o reasignar los productos que usan esta presentación.`);
+    throw new Error(`No se puede eliminar el empaquetado "${presentationName}" porque tiene ${productCount} producto(s) asociado(s). Primero debe eliminar o reasignar los productos que usan este empaquetado.`);
   }
 
   // Soft delete (status = 'deleted' para que no aparezca en frontend)

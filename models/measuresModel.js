@@ -70,7 +70,7 @@ const createMeasure = async ({ name, abbreviation, conversionFactor, isActive, u
   const checkResult = await pool.query(checkQuery, [name]);
 
   if (checkResult.rows.length > 0) {
-    throw new Error('Ya existe una medida con ese nombre');
+    throw new Error('Ya existe un tipo de corte con ese nombre');
   }
 
   // Determinar el status inicial basado en isActive (por defecto true)
@@ -112,7 +112,7 @@ const updateMeasure = async (id, { name, abbreviation, conversionFactor, isActiv
   const checkResult = await pool.query(checkQuery, [id]);
 
   if (checkResult.rows.length === 0) {
-    throw new Error('Medida no encontrada');
+    throw new Error('Tipo de corte no encontrado');
   }
 
   // Si se cambia el nombre, verificar que no exista otro con el mismo nombre
@@ -120,7 +120,7 @@ const updateMeasure = async (id, { name, abbreviation, conversionFactor, isActiv
     const duplicateCheck = `SELECT id FROM medidas WHERE LOWER(nombre) = LOWER($1) AND id != $2 AND status = 'active'`;
     const duplicateResult = await pool.query(duplicateCheck, [name, id]);
     if (duplicateResult.rows.length > 0) {
-      throw new Error('Ya existe otra medida con ese nombre');
+      throw new Error('Ya existe otro tipo de corte con ese nombre');
     }
   }
 
@@ -190,14 +190,14 @@ const deleteMeasure = async (id, userId) => {
   const checkResult = await pool.query(checkQuery, [id]);
 
   if (checkResult.rows.length === 0) {
-    throw new Error('Medida no encontrada');
+    throw new Error('Tipo de corte no encontrado');
   }
 
   const measureName = checkResult.rows[0].nombre;
 
   // Si ya está eliminada, no hacer nada
   if (checkResult.rows[0].status === 'deleted') {
-    return { success: true, message: 'La medida ya estaba eliminada' };
+    return { success: true, message: 'El tipo de corte ya estaba eliminado' };
   }
 
   // Verificar que no tenga productos asociados (activos o inactivos)
@@ -210,7 +210,7 @@ const deleteMeasure = async (id, userId) => {
   const productCount = parseInt(productsResult.rows[0].count);
 
   if (productCount > 0) {
-    throw new Error(`No se puede eliminar la medida "${measureName}" porque tiene ${productCount} producto(s) asociado(s). Primero debe eliminar o reasignar los productos que usan esta medida.`);
+    throw new Error(`No se puede eliminar el tipo de corte "${measureName}" porque tiene ${productCount} producto(s) asociado(s). Primero debe eliminar o reasignar los productos que usan este tipo de corte.`);
   }
 
   // Soft delete (status = 'deleted' para que no aparezca en frontend)

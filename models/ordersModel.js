@@ -59,7 +59,13 @@ const listOrders = async ({ page = 1, pageSize = 20, status, customerId, branchI
     paramIndex++;
   }
   if (search) {
-    whereConditions.push(`u.name ILIKE $${paramIndex}`);
+    // Buscar por: nombre del cliente, nombre de contacto, teléfono de contacto y teléfono del usuario
+    whereConditions.push(`(
+      u.name ILIKE $${paramIndex}
+      OR c.contact_name ILIKE $${paramIndex}
+      OR c.contact_phone ILIKE $${paramIndex}
+      OR u.phone ILIKE $${paramIndex}
+    )`);
     params.push(`%${search}%`);
     paramIndex++;
   }
@@ -399,19 +405,21 @@ const createOrder = async ({
     }
 
     const customer = customerResult.rows[0];
-    const customerType = customer.customer_type || 'RECURRENTE';
+    // Normalización defensiva del tipo de cliente:
+    // Un cliente se trata como "al contado" SOLO si está explícitamente marcado como
+    // NO_RECURRENTE. Cualquier otro valor (nulo, con espacios, distinta capitalización,
+    // valores legacy) se trata como RECURRENTE (a crédito), que es el default del sistema.
+    // Esto evita que un valor "sucio" de customer_type deje el pedido SIN cargo de crédito.
+    const rawCustomerType = (customer.customer_type || '').trim().toUpperCase();
+    const customerType = rawCustomerType === 'NO_RECURRENTE' ? 'NO_RECURRENTE' : 'RECURRENTE';
 
     // NOTA: Ya no bloqueamos pedidos NO_RECURRENTE sin voucher aquí.
     // El frontend sube el voucher DESPUÉS de crear el pedido.
     // El voucher se validará en el flujo de aprobación de pago.
 
-    // VALIDACION 2: Determinar tipo_pago según customer_type
-    let tipoPago = null;
-    if (customerType === 'RECURRENTE') {
-      tipoPago = 'CREDITO';
-    } else if (customerType === 'NO_RECURRENTE') {
-      tipoPago = 'CONTADO';
-    }
+    // VALIDACION 2: Determinar tipo_pago según customer_type (ya normalizado).
+    // Siempre queda definido: CREDITO para RECURRENTE, CONTADO para NO_RECURRENTE.
+    const tipoPago = customerType === 'RECURRENTE' ? 'CREDITO' : 'CONTADO';
 
     // VALIDACION 3: Verificar horario de ruta y ajustar fecha si es necesario
     // Si se pasa el horario límite, el pedido se agenda para el día siguiente
@@ -680,7 +688,7 @@ const updateOrder = async (orderId, items, userId) => {
     await client.query('BEGIN');
 
     // Verificar que el pedido existe y esta en estado pendiente
-    const checkQuery = `SELECT id, estado FROM pedidos WHERE id = $1 AND status != 'inactive'`;
+    const checkQuery = `SELECT id, estado, customer_id FROM pedidos WHERE id = $1 AND status != 'inactive'`;
     const checkResult = await client.query(checkQuery, [orderId]);
 
     if (checkResult.rows.length === 0) {
@@ -689,6 +697,8 @@ const updateOrder = async (orderId, items, userId) => {
     if (checkResult.rows[0].estado !== 'pendiente') {
       throw new Error('Solo se pueden editar pedidos en estado pendiente');
     }
+
+    const customerId = checkResult.rows[0].customer_id;
 
     // Procesar items
     for (const item of items) {
@@ -711,6 +721,44 @@ const updateOrder = async (orderId, items, userId) => {
           UPDATE pedido_detalles SET cantidad = $1, subtotal_linea = $2, user_id_modification = $3, date_time_modification = NOW()
           WHERE id = $4 AND pedido_id = $5
         `, [item.quantity, itemSubtotal, userId, item.id, orderId]);
+      } else if (!item.id && item.productId && item.quantity !== undefined) {
+        // Agregar un producto NUEVO al pedido (item sin id pero con productId).
+        // El precio se calcula en el servidor (precio especial del cliente o precio base)
+        // para no confiar en el precio enviado por el frontend.
+        const precioInfo = await client.query(`
+          SELECT
+            COALESCE(
+              (SELECT pc.precio_especial
+                 FROM precios_cliente pc
+                WHERE pc.producto_id = prod.id
+                  AND pc.customer_id = $2
+                  AND pc.status = 'active'
+                  AND (pc.fecha_inicio IS NULL OR pc.fecha_inicio <= CURRENT_DATE)
+                  AND (pc.fecha_fin IS NULL OR pc.fecha_fin >= CURRENT_DATE)
+                ORDER BY pc.id DESC
+                LIMIT 1),
+              prod.precio_base
+            ) AS precio_kg,
+            COALESCE(pres.peso, 1) AS peso
+          FROM productos prod
+          LEFT JOIN presentaciones pres ON prod.presentacion_id = pres.id
+          WHERE prod.id = $1 AND prod.status = 'active'
+        `, [item.productId, customerId]);
+
+        if (precioInfo.rows.length === 0) {
+          throw new Error('Producto no encontrado o inactivo');
+        }
+
+        const precioKg = parseFloat(precioInfo.rows[0].precio_kg) || 0;
+        const pesoBolsa = parseFloat(precioInfo.rows[0].peso) || 1;
+        // precio_unitario = precio por bolsa = precio por kg * kilos por bolsa
+        const precioUnitario = precioKg * pesoBolsa;
+        const itemSubtotal = (parseFloat(item.quantity) || 0) * precioUnitario;
+
+        await client.query(`
+          INSERT INTO pedido_detalles (pedido_id, producto_id, cantidad, precio_unitario, subtotal_linea, user_id_registration)
+          VALUES ($1, $2, $3, $4, $5, $6)
+        `, [orderId, item.productId, item.quantity, precioUnitario, itemSubtotal, userId]);
       }
     }
 
@@ -847,9 +895,12 @@ const cancelOrder = async (orderId, reason, userId) => {
     }
 
     // Cancelar el pedido
+    // Se limpia ruta_diaria_id para desvincularlo de cualquier ruta asignada:
+    // un pedido cancelado no debe seguir apareciendo en la ruta del chofer.
     const updateQuery = `
       UPDATE pedidos
       SET estado = 'cancelado',
+          ruta_diaria_id = NULL,
           observaciones = COALESCE(observaciones || ' | ', '') || 'CANCELADO: ' || $1,
           user_id_modification = $2,
           date_time_modification = NOW()
@@ -936,7 +987,7 @@ const deliverOrder = async ({ orderId, paymentType, cashAmount, creditAmount, cr
     // Verificar estado del pedido y si ya tiene movimiento de crédito
     const checkPedido = `
       SELECT p.id, p.estado, p.total, p.customer_id, p.tipo_pago,
-             c.current_balance, c.credit_days AS customer_credit_days,
+             c.current_balance, c.credit_days AS customer_credit_days, c.customer_type,
              (SELECT COUNT(*) FROM movimientos_credito mc WHERE mc.pedido_id = p.id AND mc.tipo_movimiento = 'CARGO' AND mc.status = 'active') AS cargos_existentes
       FROM pedidos p
       LEFT JOIN customers c ON p.customer_id = c.id
@@ -968,12 +1019,25 @@ const deliverOrder = async ({ orderId, paymentType, cashAmount, creditAmount, cr
     let creditMovementId = null;
     const cargosExistentes = parseInt(pedido.cargos_existentes) || 0;
 
-    // Si hay monto a crédito Y no hay cargos previos (evitar duplicar cargo de clientes RECURRENTES)
-    // Los clientes RECURRENTES ya tienen su cargo creado al momento de crear el pedido
-    if (credit > 0 && pedido.customer_id && cargosExistentes === 0) {
+    // Determinar el tipo de cliente de forma defensiva (mismo criterio que en la creación):
+    // es cliente a crédito salvo que esté explícitamente marcado como NO_RECURRENTE.
+    const rawCustomerType = (pedido.customer_type || '').trim().toUpperCase();
+    const esClienteCredito = rawCustomerType !== 'NO_RECURRENTE';
+
+    // Monto que debe quedar registrado como CARGO a crédito:
+    // - Cliente RECURRENTE (a crédito): el TOTAL del pedido. Opera siempre a crédito;
+    //   los pagos en efectivo se registran por separado como ABONO en el módulo de Pagos.
+    //   Su cargo normalmente ya se creó al CREAR el pedido, por lo que este bloque solo
+    //   actúa como RED DE SEGURIDAD cuando, por cualquier motivo, el cargo no existe.
+    // - Cliente NO_RECURRENTE (contado): solo el monto a crédito indicado en la entrega.
+    const montoCargo = esClienteCredito ? total : credit;
+
+    // Crear el CARGO solo si corresponde y NO existe ya uno (la guarda cargosExistentes
+    // evita duplicar el cargo de los clientes RECURRENTES creado en la creación del pedido).
+    if (montoCargo > 0 && pedido.customer_id && cargosExistentes === 0) {
       const currentBalance = parseFloat(pedido.current_balance) || 0;
       const customerCreditDays = parseInt(pedido.customer_credit_days) || 30;
-      const newBalance = currentBalance + credit;
+      const newBalance = currentBalance + montoCargo;
 
       // Crear movimiento de crédito (CARGO) con fecha_vencimiento calculada
       const insertMovimiento = `
@@ -985,7 +1049,7 @@ const deliverOrder = async ({ orderId, paymentType, cashAmount, creditAmount, cr
         RETURNING id
       `;
       const movResult = await client.query(insertMovimiento, [
-        pedido.customer_id, orderId, credit, currentBalance, newBalance,
+        pedido.customer_id, orderId, montoCargo, currentBalance, newBalance,
         `Cargo por pedido #${orderId}`, userId, customerCreditDays
       ]);
       creditMovementId = movResult.rows[0].id;
@@ -996,7 +1060,9 @@ const deliverOrder = async ({ orderId, paymentType, cashAmount, creditAmount, cr
         WHERE id = $3
       `, [newBalance, userId, pedido.customer_id]);
 
-      console.log('[ENTREGA] Cargo adicional creado en entrega (no había cargo previo)');
+      console.log('[ENTREGA] CARGO reconciliado en la entrega (no existía cargo previo):', {
+        orderId, customerId: pedido.customer_id, monto: montoCargo, esClienteCredito
+      });
     } else if (cargosExistentes > 0) {
       console.log('[ENTREGA] Ya existe cargo previo para este pedido, no se crea duplicado');
     }

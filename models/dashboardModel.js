@@ -52,7 +52,7 @@ const getDashboardStats = async ({ branchId, userId, roleName }) => {
       COALESCE(SUM(total) FILTER (WHERE DATE(fecha_pedido) = $1), 0) AS total_ventas_hoy,
       COUNT(*) FILTER (WHERE estado = 'pendiente') AS pedidos_pendientes
     FROM pedidos
-    WHERE status = 'active'
+    WHERE status = 'active' AND estado != 'cancelado'
   `;
 
   // Query de clientes con deuda (JOIN con users para filtrar por branch_id)

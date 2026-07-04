@@ -8,6 +8,7 @@ const {
   getRoutesReport,
   getKilosBySpeciesReport,
   getCustomersReport,
+  getCustomerConsumptionReport,
   getCustomersExportData
 } = require('../models/reportsModel');
 const jwt = require('jsonwebtoken');
@@ -263,6 +264,58 @@ const getCustomers = async (req, res) => {
 };
 
 /**
+ * GET /api/v1/reports/customers/consumption - API-065b
+ * Detallado de consumo por cliente y por día (importe total y nº de pedidos)
+ */
+const getCustomerConsumption = async (req, res) => {
+  try {
+    const decoded = decodeToken(req);
+    if (!decoded) {
+      return res.status(401).json({ success: false, error: 'Token invalido o expirado' });
+    }
+
+    // Roles permitidos: SUPERADMINISTRADOR, ADMINISTRADOR
+    if (!checkRoles(decoded, ['SUPERADMINISTRADOR', 'ADMINISTRADOR'])) {
+      return res.status(403).json({ success: false, error: 'No tiene permisos para acceder a este recurso' });
+    }
+
+    const { dateFrom, dateTo, branchId } = req.query;
+
+    // Fechas obligatorias
+    if (!dateFrom || !dateTo) {
+      return res.status(400).json({ success: false, error: 'dateFrom y dateTo son obligatorios' });
+    }
+
+    // Validar que dateFrom <= dateTo
+    if (new Date(dateFrom) > new Date(dateTo)) {
+      return res.status(400).json({ success: false, error: 'dateFrom debe ser menor o igual a dateTo' });
+    }
+
+    // Validar rango maximo de 90 dias
+    const diffTime = Math.abs(new Date(dateTo) - new Date(dateFrom));
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    if (diffDays > 90) {
+      return res.status(400).json({ success: false, error: 'El rango maximo es de 90 dias' });
+    }
+
+    const result = await getCustomerConsumptionReport({
+      dateFrom,
+      dateTo,
+      branchId: branchId ? parseInt(branchId) : (decoded.role_name?.toLowerCase() !== 'superadministrador' ? decoded.branch_id : null)
+    });
+
+    res.json({
+      success: true,
+      ...result
+    });
+
+  } catch (error) {
+    console.error('Error obteniendo reporte de consumo por cliente:', error);
+    res.status(500).json({ success: false, error: 'Error interno del servidor' });
+  }
+};
+
+/**
  * GET /api/v1/reports/customers/export - API-066
  * Exportar reporte de clientes
  */
@@ -331,5 +384,6 @@ module.exports = {
   getRoutes,
   getKilosBySpecies,
   getCustomers,
+  getCustomerConsumption,
   exportCustomers
 };

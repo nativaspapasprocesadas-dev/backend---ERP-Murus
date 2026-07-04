@@ -6,9 +6,47 @@ const prisma = new PrismaClient();
 async function main() {
   console.log('🌱 Iniciando seed MINIMO para ERP Papas...\n');
   console.log('═══════════════════════════════════════════════════════════════');
-  console.log('   Este seed contiene SOLO los datos estructurales necesarios');
-  console.log('   para que el sistema funcione desde cero.');
+  console.log('   Este seed LIMPIA todos los datos y reinserta SOLO los');
+  console.log('   datos estructurales necesarios para que el sistema funcione.');
+  console.log('   ⚠️  El schema (tablas/columnas/índices) NO se modifica.');
   console.log('═══════════════════════════════════════════════════════════════\n');
+
+  // ============================================
+  // 0. LIMPIEZA DE DATOS (preserva schema)
+  // TRUNCATE ... RESTART IDENTITY CASCADE borra todas las filas
+  // y reinicia los contadores SERIAL (id vuelve a 1). El schema
+  // (estructura/columnas/índices) se mantiene intacto.
+  // ============================================
+  console.log('🧹 Limpiando datos de todas las tablas...');
+  await prisma.$executeRawUnsafe(`
+    TRUNCATE TABLE
+      "comunicado_lecturas",
+      "comunicado_destinatarios",
+      "comunicados",
+      "comentarios",
+      "pizarra_produccion",
+      "movimientos_credito",
+      "pedido_detalles",
+      "pedidos",
+      "rutas_diarias",
+      "rutas_config",
+      "choferes",
+      "precios_cliente",
+      "productos",
+      "presentaciones",
+      "medidas",
+      "especies",
+      "customers",
+      "user_sessions",
+      "users",
+      "configuracion_sistema",
+      "roles_permissions",
+      "permissions",
+      "roles",
+      "branches"
+    RESTART IDENTITY CASCADE;
+  `);
+  console.log('✅ Datos limpiados (schema preservado)\n');
 
   // ============================================
   // 1. ROLES

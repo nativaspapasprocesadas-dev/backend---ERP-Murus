@@ -205,7 +205,7 @@ const getRouteForExport = async (routeId) => {
     FROM pedidos p
     LEFT JOIN customers c ON p.customer_id = c.id
     LEFT JOIN users u ON c.user_id = u.id
-    WHERE p.ruta_diaria_id = $1 AND p.status = 'active'
+    WHERE p.ruta_diaria_id = $1 AND p.status = 'active' AND p.estado != 'cancelado'
     ORDER BY p.id
   `;
 
@@ -366,16 +366,16 @@ const listDailyRoutes = async ({ date, dateFrom, dateTo, branchId, status, userB
       ch.nombre AS "driverName",
       ch.licencia AS "driverLicense",
       rc.branch_id AS "branchId",
-      (SELECT COUNT(*) FROM pedidos p WHERE p.ruta_diaria_id = rd.id AND p.status = 'active') AS "orderCount",
+      (SELECT COUNT(*) FROM pedidos p WHERE p.ruta_diaria_id = rd.id AND p.status = 'active' AND p.estado != 'cancelado') AS "orderCount",
       (SELECT COALESCE(SUM(pd.cantidad * COALESCE(pres.peso, 1)), 0)
        FROM pedidos p
        JOIN pedido_detalles pd ON pd.pedido_id = p.id
        LEFT JOIN productos prod ON pd.producto_id = prod.id
        LEFT JOIN presentaciones pres ON prod.presentacion_id = pres.id
-       WHERE p.ruta_diaria_id = rd.id AND p.status = 'active' AND pd.status = 'active') AS "totalKilos",
+       WHERE p.ruta_diaria_id = rd.id AND p.status = 'active' AND p.estado != 'cancelado' AND pd.status = 'active') AS "totalKilos",
       (SELECT COALESCE(SUM(p.total), 0)
        FROM pedidos p
-       WHERE p.ruta_diaria_id = rd.id AND p.status = 'active') AS "totalAmount"
+       WHERE p.ruta_diaria_id = rd.id AND p.status = 'active' AND p.estado != 'cancelado') AS "totalAmount"
     FROM rutas_diarias rd
     JOIN rutas_config rc ON rd.ruta_config_id = rc.id
     LEFT JOIN choferes ch ON rd.chofer_id = ch.id
@@ -464,7 +464,7 @@ const getRouteDetail = async (routeId) => {
     FROM pedidos p
     LEFT JOIN customers c ON p.customer_id = c.id
     LEFT JOIN users u ON c.user_id = u.id
-    WHERE p.ruta_diaria_id = $1 AND p.status = 'active'
+    WHERE p.ruta_diaria_id = $1 AND p.status = 'active' AND p.estado != 'cancelado'
     ORDER BY p.id
   `;
 

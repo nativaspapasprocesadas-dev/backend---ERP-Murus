@@ -12,7 +12,10 @@ const { getPeruDateString, formatDateFromDB } = require('../utils/dateUtils');
  * @returns {Promise<Object>} Resumen general de ventas
  */
 const getReportsSummary = async ({ dateFrom, dateTo, branchId }) => {
-  let whereConditions = ["p.status = 'active'", "p.estado = 'completado'"];
+  // Las ventas suman todos los pedidos NO cancelados (pendiente + completado),
+  // consistente con el Dashboard (dashboardModel) y la convención del proyecto.
+  // Antes filtraba estado = 'completado', lo que ocultaba los pedidos pendientes de las ventas del día.
+  let whereConditions = ["p.status = 'active'", "p.estado != 'cancelado'"];
   const params = [];
   let paramIndex = 1;
 
@@ -269,7 +272,9 @@ const getReportsSummary = async ({ dateFrom, dateTo, branchId }) => {
  * @returns {Promise<Object>} Reporte de ventas por dia
  */
 const getDailySalesReport = async ({ dateFrom, dateTo, branchId }) => {
-  let whereConditions = ["p.status = 'active'", "p.estado = 'completado'"];
+  // Ventas del día = todos los pedidos NO cancelados (pendiente + completado).
+  // Antes solo contaba estado = 'completado', por lo que días con pedidos solo pendientes salían en cero.
+  let whereConditions = ["p.status = 'active'", "p.estado != 'cancelado'"];
   const params = [];
   let paramIndex = 1;
 
@@ -538,7 +543,9 @@ const getRoutesReport = async ({ dateFrom, dateTo, branchId }) => {
  * @returns {Promise<Object>} Distribucion de kilos por especie
  */
 const getKilosBySpeciesReport = async ({ dateFrom, dateTo, speciesId, branchId, groupByDate = false }) => {
-  let whereConditions = ["p.status = 'active'", "p.estado = 'completado'"];
+  // Kilos por especie: incluir todos los pedidos NO cancelados (pendiente + completado),
+  // consistente con los demás reportes de ventas.
+  let whereConditions = ["p.status = 'active'", "p.estado != 'cancelado'"];
   const params = [];
   let paramIndex = 1;
 
@@ -903,6 +910,102 @@ const getCustomersReport = async ({ branchId, hasDebt, customerType, page = 1, p
 };
 
 /**
+ * Reporte de consumo por cliente y por día - API-065b
+ * Para cada cliente devuelve el importe total consumido por día y la
+ * cantidad de pedidos realizados en cada día dentro del rango.
+ *
+ * Convención de "consumo": pedidos NO cancelados (pendiente + completado),
+ * consistente con getDailySalesReport / getReportsSummary.
+ *
+ * @param {Object} params - { dateFrom, dateTo, branchId }
+ * @returns {Promise<Object>} { summary, customers: [{ id, name, totalImporte, totalPedidos, dias: [{ dia, importe, pedidos }] }] }
+ */
+const getCustomerConsumptionReport = async ({ dateFrom, dateTo, branchId }) => {
+  let whereConditions = ["p.status = 'active'", "p.estado != 'cancelado'"];
+  const params = [];
+  let paramIndex = 1;
+
+  whereConditions.push(`DATE(p.fecha_pedido) >= $${paramIndex}`);
+  params.push(dateFrom);
+  paramIndex++;
+
+  whereConditions.push(`DATE(p.fecha_pedido) <= $${paramIndex}`);
+  params.push(dateTo);
+  paramIndex++;
+
+  if (branchId) {
+    whereConditions.push(`p.branch_id = $${paramIndex}`);
+    params.push(branchId);
+    paramIndex++;
+  }
+
+  const whereClause = 'WHERE ' + whereConditions.join(' AND ');
+
+  // Importe diario por cliente: se calcula con un subquery de detalles para
+  // evitar inflar el conteo de pedidos al hacer JOIN con pedido_detalles.
+  const query = `
+    SELECT
+      c.id AS customer_id,
+      COALESCE(u.name, 'Sin nombre') AS customer_name,
+      TO_CHAR(DATE(p.fecha_pedido), 'YYYY-MM-DD') AS dia,
+      COUNT(DISTINCT p.id) AS total_pedidos,
+      COALESCE(SUM(
+        (SELECT COALESCE(SUM(pd.subtotal_linea), 0)
+         FROM pedido_detalles pd
+         WHERE pd.pedido_id = p.id AND pd.status = 'active')
+      ), 0) AS total_importe
+    FROM pedidos p
+    INNER JOIN customers c ON p.customer_id = c.id
+    LEFT JOIN users u ON c.user_id = u.id
+    ${whereClause}
+    GROUP BY c.id, u.name, DATE(p.fecha_pedido)
+    ORDER BY customer_name ASC, dia ASC
+  `;
+  const result = await pool.query(query, params);
+
+  // Agrupar por cliente
+  const clientesMap = new Map();
+  let totalImporteGeneral = 0;
+  let totalPedidosGeneral = 0;
+
+  for (const row of result.rows) {
+    const importe = parseFloat(row.total_importe) || 0;
+    const pedidos = parseInt(row.total_pedidos) || 0;
+
+    totalImporteGeneral += importe;
+    totalPedidosGeneral += pedidos;
+
+    if (!clientesMap.has(row.customer_id)) {
+      clientesMap.set(row.customer_id, {
+        id: row.customer_id,
+        name: row.customer_name,
+        totalImporte: 0,
+        totalPedidos: 0,
+        dias: []
+      });
+    }
+
+    const cliente = clientesMap.get(row.customer_id);
+    cliente.totalImporte += importe;
+    cliente.totalPedidos += pedidos;
+    cliente.dias.push({ dia: row.dia, importe, pedidos });
+  }
+
+  // Ordenar clientes por importe total descendente (mayor consumo primero)
+  const customers = Array.from(clientesMap.values())
+    .sort((a, b) => b.totalImporte - a.totalImporte);
+
+  return {
+    summary: {
+      totalCustomers: customers.length,
+      totalImporte: totalImporteGeneral,
+      totalPedidos: totalPedidosGeneral
+    },
+    customers
+  };
+};
+
+/**
  * Exportar reporte de clientes - API-066
  * @param {Object} params - Parametros de filtro
  * @returns {Promise<Array>} Datos para exportar
@@ -979,5 +1082,6 @@ module.exports = {
   getRoutesReport,
   getKilosBySpeciesReport,
   getCustomersReport,
+  getCustomerConsumptionReport,
   getCustomersExportData
 };

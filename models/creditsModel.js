@@ -220,6 +220,7 @@ const getDebtors = async ({ page = 1, pageSize = 20, branchId, hasOverdue, searc
               JOIN rutas_config rc ON rd.ruta_config_id = rc.id
               WHERE p.customer_id = c.id
                 AND p.status = 'active'
+                AND p.estado != 'cancelado'
                 AND rd.status = 'active'
                 AND rd.fecha = CURRENT_DATE
                 AND rd.estado IN ('en_curso', 'completada')
@@ -416,6 +417,132 @@ const getCustomerCreditAccount = async (customerId, { page = 1, pageSize = 20 })
 };
 
 /**
+ * Obtener todos los clientes con deuda y sus movimientos para exportación a Excel
+ * No pagina: devuelve el universo completo de deudores (respetando sede y búsqueda)
+ * junto con el detalle cronológico de cada movimiento de crédito.
+ * @param {Object} params - Filtros
+ * @param {number} [params.branchId] - Filtrar por sede
+ * @param {string} [params.search] - Filtrar por nombre de cliente
+ * @returns {Promise<Object>} { debtors, movements }
+ */
+const getDebtorsForExport = async ({ branchId, search } = {}) => {
+  let whereConditions = ["c.status = 'active'"];
+  const params = [];
+  let paramIndex = 1;
+
+  // Filtro por sede: consistente con getDebtors (API-022)
+  if (branchId) {
+    whereConditions.push(`(
+      (c.route_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM rutas_config rc WHERE rc.id = c.route_id AND rc.branch_id = $${paramIndex}
+      ))
+      OR (c.route_id IS NULL AND u.branch_id = $${paramIndex})
+    )`);
+    params.push(branchId);
+    paramIndex++;
+  }
+
+  // Filtro por búsqueda de nombre de cliente
+  if (search && search.trim()) {
+    whereConditions.push(`u.name ILIKE $${paramIndex}`);
+    params.push(`%${search.trim()}%`);
+    paramIndex++;
+  }
+
+  const whereClause = 'WHERE ' + whereConditions.join(' AND ');
+
+  // Todos los deudores con deuda calculada > 0 (sin paginación)
+  // Deuda = CARGOS + SALDO_INICIAL - ABONOS
+  const debtorsQuery = `
+    SELECT *
+    FROM (
+      SELECT
+        c.id AS "customerId",
+        u.name AS "customerName",
+        COALESCE(u.phone, c.contact_phone) AS "phone",
+        c.credit_days AS "creditDays",
+        COALESCE(
+          (SELECT SUM(monto) FROM movimientos_credito mc WHERE mc.customer_id = c.id AND mc.tipo_movimiento IN ('CARGO', 'SALDO_INICIAL') AND mc.status = 'active'), 0
+        ) - COALESCE(
+          (SELECT SUM(monto) FROM movimientos_credito mc WHERE mc.customer_id = c.id AND mc.tipo_movimiento = 'ABONO' AND mc.status = 'active'), 0
+        ) AS "totalDebt",
+        (
+          SELECT COUNT(*) FROM movimientos_credito mc
+          WHERE mc.customer_id = c.id
+            AND mc.tipo_movimiento = 'CARGO'
+            AND mc.status = 'active'
+            AND mc.fecha_vencimiento IS NOT NULL
+            AND mc.fecha_vencimiento < NOW()
+        ) AS "overdueCharges",
+        (
+          SELECT COUNT(*) FROM movimientos_credito mc3
+          WHERE mc3.customer_id = c.id AND mc3.status = 'active'
+        ) AS "movementCount",
+        (
+          SELECT MAX(mc2.fecha_movimiento) FROM movimientos_credito mc2
+          WHERE mc2.customer_id = c.id AND mc2.tipo_movimiento = 'ABONO' AND mc2.status = 'active'
+        ) AS "lastPaymentDate"
+      FROM customers c
+      LEFT JOIN users u ON c.user_id = u.id
+      ${whereClause}
+    ) sub
+    WHERE sub."totalDebt" > 0
+    ORDER BY sub."totalDebt" DESC
+  `;
+  const debtorsResult = await pool.query(debtorsQuery, params);
+
+  const debtors = debtorsResult.rows.map(row => ({
+    customerId: row.customerId,
+    customerName: row.customerName,
+    phone: row.phone || null,
+    creditDays: row.creditDays || 0,
+    totalDebt: parseFloat(row.totalDebt) || 0,
+    overdueCharges: parseInt(row.overdueCharges) || 0,
+    movementCount: parseInt(row.movementCount) || 0,
+    lastPaymentDate: row.lastPaymentDate
+  }));
+
+  // Movimientos de todos los deudores (una sola query)
+  let movements = [];
+  const debtorIds = debtors.map(d => d.customerId);
+  if (debtorIds.length > 0) {
+    const movementsQuery = `
+      SELECT
+        mc.customer_id AS "customerId",
+        u.name AS "customerName",
+        mc.tipo_movimiento AS "type",
+        mc.monto AS "amount",
+        mc.saldo_nuevo AS "balance",
+        mc.fecha_movimiento AS "date",
+        mc.fecha_vencimiento AS "dueDate",
+        mc.pedido_id AS "orderId",
+        mc.descripcion AS "description"
+      FROM movimientos_credito mc
+      LEFT JOIN customers c ON mc.customer_id = c.id
+      LEFT JOIN users u ON c.user_id = u.id
+      WHERE mc.customer_id = ANY($1) AND mc.status = 'active'
+      ORDER BY u.name ASC, mc.fecha_movimiento ASC
+    `;
+    const movementsResult = await pool.query(movementsQuery, [debtorIds]);
+    movements = movementsResult.rows.map(row => ({
+      customerId: row.customerId,
+      customerName: row.customerName,
+      tipo: row.type,
+      monto: parseFloat(row.amount) || 0,
+      saldo: parseFloat(row.balance) || 0,
+      fechaMovimiento: row.date,
+      fechaVencimiento: row.dueDate,
+      esVencido: row.dueDate ? new Date(row.dueDate) < getPeruDate() : false,
+      pedidoId: row.orderId,
+      referencia: row.description || `Movimiento #${row.orderId || ''}`.trim(),
+      notas: row.description
+    }));
+  }
+
+  return { debtors, movements };
+};
+
+/**
  * Enviar recordatorio de pago - API-024
  * POST /api/v1/credits/customers/:customerId/reminder
  * @param {number} customerId - ID del cliente
@@ -492,5 +619,6 @@ module.exports = {
   getClientCreditAccount,
   getDebtors,
   getCustomerCreditAccount,
+  getDebtorsForExport,
   sendPaymentReminder
 };

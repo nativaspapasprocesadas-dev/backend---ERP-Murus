@@ -63,7 +63,7 @@ const update = async (req, res) => {
     // Validar que id sea numerico
     const measureId = parseInt(id);
     if (isNaN(measureId)) {
-      return res.status(400).json({ error: 'ID de medida invalido' });
+      return res.status(400).json({ error: 'ID de tipo de corte invalido' });
     }
 
     const userId = req.user?.id || null;
@@ -78,7 +78,7 @@ const update = async (req, res) => {
     res.json(result);
   } catch (error) {
     console.error('Error en update measure:', error);
-    if (error.message === 'Medida no encontrada') {
+    if (error.message === 'Tipo de corte no encontrado') {
       return res.status(404).json({ error: error.message });
     }
     if (error.message.includes('Ya existe')) {
@@ -100,7 +100,7 @@ const remove = async (req, res) => {
     // Validar que id sea numerico
     const measureId = parseInt(id);
     if (isNaN(measureId)) {
-      return res.status(400).json({ error: 'ID de medida invalido' });
+      return res.status(400).json({ error: 'ID de tipo de corte invalido' });
     }
 
     const userId = req.user?.id || null;
@@ -109,7 +109,7 @@ const remove = async (req, res) => {
     res.json(result);
   } catch (error) {
     console.error('Error en delete measure:', error);
-    if (error.message === 'Medida no encontrada') {
+    if (error.message === 'Tipo de corte no encontrado') {
       return res.status(404).json({ error: error.message });
     }
     // Detectar error de dependencias (productos asociados)
@@ -130,13 +130,13 @@ const getById = async (req, res) => {
 
     const measureId = parseInt(id);
     if (isNaN(measureId)) {
-      return res.status(400).json({ error: 'ID de medida invalido' });
+      return res.status(400).json({ error: 'ID de tipo de corte invalido' });
     }
 
     const result = await measuresModel.getMeasureById(measureId);
 
     if (!result) {
-      return res.status(404).json({ error: 'Medida no encontrada' });
+      return res.status(404).json({ error: 'Tipo de corte no encontrado' });
     }
 
     res.json(result);

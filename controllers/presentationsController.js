@@ -71,7 +71,7 @@ const update = async (req, res) => {
     // Validar que id sea numerico
     const presentationId = parseInt(id);
     if (isNaN(presentationId)) {
-      return res.status(400).json({ error: 'ID de presentacion invalido' });
+      return res.status(400).json({ error: 'ID de empaquetado invalido' });
     }
 
     // Validar peso si se proporciona
@@ -94,7 +94,7 @@ const update = async (req, res) => {
     res.json(result);
   } catch (error) {
     console.error('Error en update presentation:', error);
-    if (error.message === 'Presentacion no encontrada') {
+    if (error.message === 'Empaquetado no encontrado') {
       return res.status(404).json({ error: error.message });
     }
     if (error.message.includes('Ya existe')) {
@@ -115,7 +115,7 @@ const remove = async (req, res) => {
     // Validar que id sea numerico
     const presentationId = parseInt(id);
     if (isNaN(presentationId)) {
-      return res.status(400).json({ error: 'ID de presentacion invalido' });
+      return res.status(400).json({ error: 'ID de empaquetado invalido' });
     }
 
     const userId = req.user?.id || null;
@@ -124,7 +124,7 @@ const remove = async (req, res) => {
     res.json(result);
   } catch (error) {
     console.error('Error en delete presentation:', error);
-    if (error.message === 'Presentacion no encontrada') {
+    if (error.message === 'Empaquetado no encontrado') {
       return res.status(404).json({ error: error.message });
     }
     // Detectar error de dependencias (productos asociados)
@@ -145,13 +145,13 @@ const getById = async (req, res) => {
 
     const presentationId = parseInt(id);
     if (isNaN(presentationId)) {
-      return res.status(400).json({ error: 'ID de presentacion invalido' });
+      return res.status(400).json({ error: 'ID de empaquetado invalido' });
     }
 
     const result = await presentationsModel.getPresentationById(presentationId);
 
     if (!result) {
-      return res.status(404).json({ error: 'Presentacion no encontrada' });
+      return res.status(404).json({ error: 'Empaquetado no encontrado' });
     }
 
     res.json(result);
