@@ -6,22 +6,51 @@
  * no existe. Se usa movimientos_credito con tipo_movimiento='ABONO' para pagos.
  */
 const pool = require('../config/db');
+const { getPendingCharges } = require('./creditsModel');
+
+// El dinero se opera en centimos enteros para evitar errores de punto flotante
+const aCentimos = (valor) => Math.round((parseFloat(valor) || 0) * 100);
+const aSoles = (centimos) => centimos / 100;
 
 /**
  * Registrar pago de cliente - API-025
  * POST /api/v1/payments
+ *
+ * El monto se reparte entre los cargos del cliente y cada asignacion queda registrada
+ * en aplicaciones_pago:
+ *  - Si se envian chargeIds, se cancelan primero esos cargos (del mas antiguo al mas
+ *    reciente entre los seleccionados) y cualquier excedente pasa al resto en FIFO.
+ *  - Si no se envian, todo el monto se aplica del cargo mas antiguo al mas reciente.
+ *
  * @param {Object} data - Datos del pago
- * @returns {Promise<Object>} Pago registrado
+ * @param {number[]} [data.chargeIds] - Cargos que el usuario eligio cancelar (opcional)
+ * @returns {Promise<Object>} Pago registrado con el detalle de cargos afectados
  */
-const createPayment = async ({ customerId, amount, paymentMethod, reference, notes, signature, userId }) => {
+const createPayment = async ({ customerId, amount, paymentMethod, reference, notes, signature, userId, chargeIds }) => {
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
 
-    // Verificar que el cliente existe
+    // Serializar los pagos de un mismo cliente: evita que dos abonos simultaneos
+    // se apliquen sobre la misma foto de cargos pendientes
+    await client.query('SELECT id FROM customers WHERE id = $1 FOR UPDATE', [customerId]);
+
+    // Verificar que el cliente existe y calcular su saldo real
+    // El saldo se deriva de los movimientos (CARGOS + SALDO_INICIAL - ABONOS),
+    // misma formula que usa el modulo de creditos, para que saldo_anterior/saldo_nuevo
+    // sean consistentes con lo que ve el usuario en el estado de cuenta.
     const customerQuery = `
-      SELECT c.id, c.current_balance, u.name
+      SELECT
+        c.id,
+        u.name,
+        COALESCE(
+          (SELECT SUM(monto) FROM movimientos_credito mc
+           WHERE mc.customer_id = c.id AND mc.tipo_movimiento IN ('CARGO', 'SALDO_INICIAL') AND mc.status = 'active'), 0
+        ) - COALESCE(
+          (SELECT SUM(monto) FROM movimientos_credito mc
+           WHERE mc.customer_id = c.id AND mc.tipo_movimiento = 'ABONO' AND mc.status = 'active'), 0
+        ) AS calculated_balance
       FROM customers c
       LEFT JOIN users u ON c.user_id = u.id
       WHERE c.id = $1 AND c.status = 'active'
@@ -33,12 +62,45 @@ const createPayment = async ({ customerId, amount, paymentMethod, reference, not
     }
 
     const customer = customerResult.rows[0];
-    const currentBalance = parseFloat(customer.current_balance) || 0;
+    const currentBalance = parseFloat(customer.calculated_balance) || 0;
     const paymentAmount = parseFloat(amount) || 0;
 
     if (paymentAmount <= 0) {
       throw new Error('El monto debe ser un numero positivo');
     }
+
+    // Cargos pendientes del cliente, del mas antiguo al mas reciente
+    const cargosPendientes = await getPendingCharges(customerId, client);
+    const totalPendienteCent = cargosPendientes.reduce((acc, c) => acc + aCentimos(c.montoPendiente), 0);
+    let restanteCent = aCentimos(paymentAmount);
+
+    if (restanteCent > totalPendienteCent) {
+      throw new Error(
+        `El monto (S/. ${paymentAmount.toFixed(2)}) supera la deuda pendiente del cliente (S/. ${aSoles(totalPendienteCent).toFixed(2)})`
+      );
+    }
+
+    // Orden de aplicacion: primero los cargos elegidos por el usuario (en FIFO entre
+    // ellos), luego el resto tambien en FIFO para absorber cualquier excedente
+    const seleccionados = Array.isArray(chargeIds)
+      ? chargeIds.map(id => parseInt(id)).filter(id => !isNaN(id))
+      : [];
+
+    if (seleccionados.length > 0) {
+      const idsPendientes = new Set(cargosPendientes.map(c => c.id));
+      const invalidos = seleccionados.filter(id => !idsPendientes.has(id));
+      if (invalidos.length > 0) {
+        throw new Error(
+          'Alguno de los cargos seleccionados ya fue pagado o no pertenece al cliente. Actualiza la vista e intenta de nuevo'
+        );
+      }
+    }
+
+    const setSeleccionados = new Set(seleccionados);
+    const ordenAplicacion = [
+      ...cargosPendientes.filter(c => setSeleccionados.has(c.id)),
+      ...cargosPendientes.filter(c => !setSeleccionados.has(c.id))
+    ];
 
     // Calcular nuevo saldo
     const newBalance = currentBalance - paymentAmount;
@@ -64,6 +126,32 @@ const createPayment = async ({ customerId, amount, paymentMethod, reference, not
 
     const movementId = movResult.rows[0].id;
 
+    // Registrar a que cargos se aplica este abono
+    const aplicaciones = [];
+    for (const cargo of ordenAplicacion) {
+      if (restanteCent <= 0) break;
+
+      const pendienteCent = aCentimos(cargo.montoPendiente);
+      if (pendienteCent <= 0) continue;
+
+      const aplicarCent = Math.min(restanteCent, pendienteCent);
+      restanteCent -= aplicarCent;
+
+      await client.query(`
+        INSERT INTO aplicaciones_pago (abono_id, cargo_id, monto_aplicado, user_id_registration)
+        VALUES ($1, $2, $3, $4)
+      `, [movementId, cargo.id, aSoles(aplicarCent), userId]);
+
+      aplicaciones.push({
+        chargeId: cargo.id,
+        reference: cargo.referencia,
+        orderId: cargo.pedidoId,
+        appliedAmount: aSoles(aplicarCent),
+        remainingAmount: aSoles(pendienteCent - aplicarCent),
+        fullyPaid: pendienteCent - aplicarCent <= 0
+      });
+    }
+
     // Actualizar saldo del cliente
     await client.query(`
       UPDATE customers SET current_balance = $1, user_id_modification = $2, date_time_modification = NOW()
@@ -80,7 +168,8 @@ const createPayment = async ({ customerId, amount, paymentMethod, reference, not
       newBalance: newBalance,
       paymentMethod: paymentMethod || 'EFECTIVO',
       reference: reference || null,
-      createdAt: movResult.rows[0].fecha_movimiento
+      createdAt: movResult.rows[0].fecha_movimiento,
+      appliedCharges: aplicaciones
     };
 
   } catch (error) {

@@ -9,6 +9,7 @@ const {
   listDebtors,
   getCustomerAccount,
   exportDebtors,
+  listPendingCharges,
   sendReminder
 } = require('../controllers/creditsController');
 
@@ -23,6 +24,10 @@ router.get('/debtors/export', exportDebtors);
 // GET /api/v1/credits/debtors - API-022
 // Listar clientes con deuda
 router.get('/debtors', listDebtors);
+
+// GET /api/v1/credits/customers/:customerId/pending-charges
+// Cargos pendientes del cliente (para elegir que cuentas se cancelan al pagar)
+router.get('/customers/:customerId/pending-charges', listPendingCharges);
 
 // GET /api/v1/credits/customers/:customerId - API-023
 // Cuenta de cliente especifico

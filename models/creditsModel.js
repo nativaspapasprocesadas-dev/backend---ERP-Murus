@@ -6,6 +6,127 @@
 const pool = require('../config/db');
 const { getPeruDate } = require('../utils/dateUtils');
 
+// El dinero se opera en centimos enteros para evitar errores de punto flotante
+const aCentimos = (valor) => Math.round((parseFloat(valor) || 0) * 100);
+const aSoles = (centimos) => centimos / 100;
+
+/**
+ * Calcular el estado de pago de cada cargo de un cliente
+ *
+ * Un cargo (CARGO o SALDO_INICIAL) se considera cancelado con:
+ *  1. Las aplicaciones de pago explicitas (tabla aplicaciones_pago), que registran
+ *     que cargos eligio pagar el usuario.
+ *  2. El remanente de ABONOS que no tiene aplicaciones registradas (pagos historicos,
+ *     anteriores a esta funcionalidad), repartido del cargo mas antiguo al mas reciente.
+ *
+ * Con esto la suma de los montos pendientes siempre coincide con el saldo del cliente
+ * (SUM CARGO + SALDO_INICIAL - SUM ABONO).
+ *
+ * @param {number} customerId - ID del cliente
+ * @param {Object} [executor] - Cliente de transaccion; por defecto el pool
+ * @returns {Promise<Array>} Cargos ordenados del mas antiguo al mas reciente
+ */
+const getChargesPaymentStatus = async (customerId, executor = pool) => {
+  // Cargos del cliente con el monto ya aplicado explicitamente
+  // (solo cuentan las aplicaciones cuyo ABONO sigue activo)
+  const cargosQuery = `
+    SELECT
+      mc.id,
+      mc.tipo_movimiento AS "tipo",
+      mc.monto,
+      mc.fecha_movimiento AS "fechaMovimiento",
+      mc.fecha_vencimiento AS "fechaVencimiento",
+      mc.descripcion,
+      mc.pedido_id AS "pedidoId",
+      COALESCE((
+        SELECT SUM(ap.monto_aplicado)
+        FROM aplicaciones_pago ap
+        JOIN movimientos_credito abono ON ap.abono_id = abono.id
+        WHERE ap.cargo_id = mc.id
+          AND ap.status = 'active'
+          AND abono.status = 'active'
+      ), 0) AS "aplicado"
+    FROM movimientos_credito mc
+    WHERE mc.customer_id = $1
+      AND mc.status = 'active'
+      AND mc.tipo_movimiento IN ('CARGO', 'SALDO_INICIAL')
+    ORDER BY mc.fecha_movimiento ASC, mc.id ASC
+  `;
+
+  // Total abonado y cuanto de ese total ya esta asignado a cargos concretos
+  const abonosQuery = `
+    SELECT
+      COALESCE((
+        SELECT SUM(mc.monto)
+        FROM movimientos_credito mc
+        WHERE mc.customer_id = $1 AND mc.status = 'active' AND mc.tipo_movimiento = 'ABONO'
+      ), 0) AS "totalAbonos",
+      COALESCE((
+        SELECT SUM(ap.monto_aplicado)
+        FROM aplicaciones_pago ap
+        JOIN movimientos_credito abono ON ap.abono_id = abono.id
+        WHERE abono.customer_id = $1
+          AND abono.status = 'active'
+          AND ap.status = 'active'
+      ), 0) AS "totalAplicado"
+  `;
+
+  const [cargosResult, abonosResult] = await Promise.all([
+    executor.query(cargosQuery, [customerId]),
+    executor.query(abonosQuery, [customerId])
+  ]);
+
+  // Abonos sin asignar: se reparten en FIFO (del cargo mas antiguo al mas reciente)
+  let remanente = aCentimos(abonosResult.rows[0].totalAbonos) - aCentimos(abonosResult.rows[0].totalAplicado);
+  if (remanente < 0) remanente = 0;
+
+  const hoy = getPeruDate();
+
+  return cargosResult.rows.map(row => {
+    const montoCent = aCentimos(row.monto);
+    const aplicadoCent = Math.min(aCentimos(row.aplicado), montoCent);
+    let pendienteCent = montoCent - aplicadoCent;
+
+    // Consumir el remanente de abonos historicos sobre este cargo
+    let implicitoCent = 0;
+    if (remanente > 0 && pendienteCent > 0) {
+      implicitoCent = Math.min(remanente, pendienteCent);
+      pendienteCent -= implicitoCent;
+      remanente -= implicitoCent;
+    }
+
+    const pagadoCent = aplicadoCent + implicitoCent;
+    const estadoPago = pendienteCent <= 0
+      ? 'PAGADO'
+      : (pagadoCent > 0 ? 'PARCIAL' : 'PENDIENTE');
+
+    return {
+      id: row.id,
+      tipo: row.tipo,
+      monto: aSoles(montoCent),
+      montoPagado: aSoles(pagadoCent),
+      montoPendiente: aSoles(pendienteCent),
+      estadoPago,
+      fechaMovimiento: row.fechaMovimiento,
+      fechaVencimiento: row.fechaVencimiento,
+      pedidoId: row.pedidoId,
+      referencia: row.descripcion || `Movimiento #${row.id}`,
+      esVencido: row.fechaVencimiento ? new Date(row.fechaVencimiento) < hoy && pendienteCent > 0 : false
+    };
+  });
+};
+
+/**
+ * Cargos con saldo pendiente de un cliente (los que se pueden seleccionar al pagar)
+ * @param {number} customerId - ID del cliente
+ * @param {Object} [executor] - Cliente de transaccion; por defecto el pool
+ * @returns {Promise<Array>} Cargos pendientes del mas antiguo al mas reciente
+ */
+const getPendingCharges = async (customerId, executor = pool) => {
+  const cargos = await getChargesPaymentStatus(customerId, executor);
+  return cargos.filter(c => c.montoPendiente > 0);
+};
+
 /**
  * Obtener estado de cuenta del cliente autenticado - API-021
  * GET /api/v1/credits/account
@@ -72,22 +193,33 @@ const getClientCreditAccount = async (userId, { page = 1, pageSize = 20 }) => {
   `;
   const movementsResult = await pool.query(movementsQuery, [customerId, pageSize, offset]);
 
+  // Estado de pago de cada cargo (cuanto se ha cancelado y cuanto queda pendiente)
+  const estadoCargos = await getChargesPaymentStatus(customerId);
+  const mapaCargos = new Map(estadoCargos.map(c => [c.id, c]));
+
   return {
     currentBalance,
-    movements: movementsResult.rows.map(row => ({
-      id: row.id,
-      // Campos en español para compatibilidad con frontend
-      tipo: row.type,
-      monto: parseFloat(row.amount) || 0,
-      saldo: parseFloat(row.balance) || 0,
-      fechaMovimiento: row.date,
-      pedidoId: row.orderId,
-      referencia: row.description || `Movimiento #${row.id}`,
-      notas: row.description,
-      // Campos adicionales para frontend
-      fechaVencimiento: row.dueDate,
-      esVencido: row.dueDate ? new Date(row.dueDate) < getPeruDate() : false
-    })),
+    movements: movementsResult.rows.map(row => {
+      const cargo = mapaCargos.get(row.id);
+      return {
+        id: row.id,
+        // Campos en español para compatibilidad con frontend
+        tipo: row.type,
+        monto: parseFloat(row.amount) || 0,
+        saldo: parseFloat(row.balance) || 0,
+        fechaMovimiento: row.date,
+        pedidoId: row.orderId,
+        referencia: row.description || `Movimiento #${row.id}`,
+        notas: row.description,
+        // Campos adicionales para frontend
+        fechaVencimiento: row.dueDate,
+        // Un cargo solo sigue vencido mientras le quede saldo pendiente
+        esVencido: cargo ? cargo.esVencido : (row.dueDate ? new Date(row.dueDate) < getPeruDate() : false),
+        montoPagado: cargo ? cargo.montoPagado : null,
+        montoPendiente: cargo ? cargo.montoPendiente : null,
+        estadoPago: cargo ? cargo.estadoPago : null
+      };
+    }),
     pagination: {
       total,
       page,
@@ -382,6 +514,10 @@ const getCustomerCreditAccount = async (customerId, { page = 1, pageSize = 20 })
   `;
   const movementsResult = await pool.query(movementsQuery, [customerId, pageSize, offset]);
 
+  // Estado de pago de cada cargo (cuanto se ha cancelado y cuanto queda pendiente)
+  const estadoCargos = await getChargesPaymentStatus(customerId);
+  const mapaCargos = new Map(estadoCargos.map(c => [c.id, c]));
+
   return {
     customer: {
       id: customer.id,
@@ -392,21 +528,28 @@ const getCustomerCreditAccount = async (customerId, { page = 1, pageSize = 20 })
       contactName: customer.contact_name
     },
     currentBalance,
-    movements: movementsResult.rows.map(row => ({
-      id: row.id,
-      // Campos en español para compatibilidad con frontend
-      tipo: row.type,
-      monto: parseFloat(row.amount) || 0,
-      saldoAnterior: parseFloat(row.previousBalance) || 0,
-      saldo: parseFloat(row.balance) || 0,
-      fechaMovimiento: row.date,
-      pedidoId: row.orderId,
-      referencia: row.description || `Movimiento #${row.id}`,
-      notas: row.description,
-      // Campos adicionales para frontend
-      fechaVencimiento: row.dueDate,
-      esVencido: row.dueDate ? new Date(row.dueDate) < getPeruDate() : false
-    })),
+    movements: movementsResult.rows.map(row => {
+      const cargo = mapaCargos.get(row.id);
+      return {
+        id: row.id,
+        // Campos en español para compatibilidad con frontend
+        tipo: row.type,
+        monto: parseFloat(row.amount) || 0,
+        saldoAnterior: parseFloat(row.previousBalance) || 0,
+        saldo: parseFloat(row.balance) || 0,
+        fechaMovimiento: row.date,
+        pedidoId: row.orderId,
+        referencia: row.description || `Movimiento #${row.id}`,
+        notas: row.description,
+        // Campos adicionales para frontend
+        fechaVencimiento: row.dueDate,
+        // Un cargo solo sigue vencido mientras le quede saldo pendiente
+        esVencido: cargo ? cargo.esVencido : (row.dueDate ? new Date(row.dueDate) < getPeruDate() : false),
+        montoPagado: cargo ? cargo.montoPagado : null,
+        montoPendiente: cargo ? cargo.montoPendiente : null,
+        estadoPago: cargo ? cargo.estadoPago : null
+      };
+    }),
     pagination: {
       total,
       page,
@@ -423,12 +566,22 @@ const getCustomerCreditAccount = async (customerId, { page = 1, pageSize = 20 })
  * @param {Object} params - Filtros
  * @param {number} [params.branchId] - Filtrar por sede
  * @param {string} [params.search] - Filtrar por nombre de cliente
+ * @param {number} [params.customerId] - Exportar el estado de cuenta de un solo cliente
+ * @param {string} [params.dateFrom] - Filtrar movimientos desde esta fecha (YYYY-MM-DD, inclusive)
+ * @param {string} [params.dateTo] - Filtrar movimientos hasta esta fecha (YYYY-MM-DD, inclusive)
  * @returns {Promise<Object>} { debtors, movements }
  */
-const getDebtorsForExport = async ({ branchId, search } = {}) => {
+const getDebtorsForExport = async ({ branchId, search, customerId, dateFrom, dateTo } = {}) => {
   let whereConditions = ["c.status = 'active'"];
   const params = [];
   let paramIndex = 1;
+
+  // Exportación del estado de cuenta de un cliente puntual
+  if (customerId) {
+    whereConditions.push(`c.id = $${paramIndex}`);
+    params.push(customerId);
+    paramIndex++;
+  }
 
   // Filtro por sede: consistente con getDebtors (API-022)
   if (branchId) {
@@ -486,7 +639,7 @@ const getDebtorsForExport = async ({ branchId, search } = {}) => {
       LEFT JOIN users u ON c.user_id = u.id
       ${whereClause}
     ) sub
-    WHERE sub."totalDebt" > 0
+    ${customerId ? '' : 'WHERE sub."totalDebt" > 0'}
     ORDER BY sub."totalDebt" DESC
   `;
   const debtorsResult = await pool.query(debtorsQuery, params);
@@ -503,9 +656,28 @@ const getDebtorsForExport = async ({ branchId, search } = {}) => {
   }));
 
   // Movimientos de todos los deudores (una sola query)
+  // El rango de fechas (si se envía) filtra únicamente el detalle de movimientos:
+  // el saldo del resumen siempre refleja la deuda acumulada real del cliente.
   let movements = [];
   const debtorIds = debtors.map(d => d.customerId);
   if (debtorIds.length > 0) {
+    const movParams = [debtorIds];
+    let movIndex = 2;
+    let dateConditions = '';
+
+    if (dateFrom) {
+      dateConditions += ` AND mc.fecha_movimiento >= $${movIndex}::date`;
+      movParams.push(dateFrom);
+      movIndex++;
+    }
+
+    if (dateTo) {
+      // Se suma un día para incluir todos los movimientos del día final
+      dateConditions += ` AND mc.fecha_movimiento < ($${movIndex}::date + INTERVAL '1 day')`;
+      movParams.push(dateTo);
+      movIndex++;
+    }
+
     const movementsQuery = `
       SELECT
         mc.customer_id AS "customerId",
@@ -521,9 +693,10 @@ const getDebtorsForExport = async ({ branchId, search } = {}) => {
       LEFT JOIN customers c ON mc.customer_id = c.id
       LEFT JOIN users u ON c.user_id = u.id
       WHERE mc.customer_id = ANY($1) AND mc.status = 'active'
+      ${dateConditions}
       ORDER BY u.name ASC, mc.fecha_movimiento ASC
     `;
-    const movementsResult = await pool.query(movementsQuery, [debtorIds]);
+    const movementsResult = await pool.query(movementsQuery, movParams);
     movements = movementsResult.rows.map(row => ({
       customerId: row.customerId,
       customerName: row.customerName,
@@ -620,5 +793,7 @@ module.exports = {
   getDebtors,
   getCustomerCreditAccount,
   getDebtorsForExport,
+  getChargesPaymentStatus,
+  getPendingCharges,
   sendPaymentReminder
 };

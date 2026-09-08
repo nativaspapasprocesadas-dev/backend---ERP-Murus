@@ -42,7 +42,7 @@ const create = async (req, res) => {
       return res.status(403).json({ success: false, error: 'No tiene permisos para registrar pagos' });
     }
 
-    const { customerId, amount, paymentMethod, reference, notes, signature } = req.body;
+    const { customerId, amount, paymentMethod, reference, notes, signature, chargeIds } = req.body;
 
     // Validaciones segun diseno API-025
     if (!customerId) {
@@ -61,6 +61,15 @@ const create = async (req, res) => {
       });
     }
 
+    // chargeIds es opcional: identifica los cargos que el usuario eligio cancelar
+    if (chargeIds !== undefined && chargeIds !== null && !Array.isArray(chargeIds)) {
+      return res.status(400).json({ success: false, error: 'chargeIds debe ser un arreglo de IDs de cargos' });
+    }
+
+    if (Array.isArray(chargeIds) && chargeIds.some(id => isNaN(parseInt(id)))) {
+      return res.status(400).json({ success: false, error: 'chargeIds contiene IDs invalidos' });
+    }
+
     const result = await createPayment({
       customerId: parseInt(customerId),
       amount: parseFloat(amount),
@@ -68,17 +77,19 @@ const create = async (req, res) => {
       reference,
       notes,
       signature: signature || null,
-      userId: decoded.id
+      userId: decoded.id,
+      chargeIds: Array.isArray(chargeIds) ? chargeIds : null
     });
 
-    // Response segun diseno API-025
+    // Response segun diseno API-025 (+ detalle de cargos cancelados)
     res.status(201).json({
       success: true,
       id: result.id,
       customerId: result.customerId,
       amount: result.amount,
       creditMovementId: result.creditMovementId,
-      newBalance: result.newBalance
+      newBalance: result.newBalance,
+      appliedCharges: result.appliedCharges
     });
 
   } catch (error) {
@@ -86,7 +97,12 @@ const create = async (req, res) => {
     if (error.message.includes('no encontrado')) {
       return res.status(404).json({ success: false, error: error.message });
     }
-    if (error.message.includes('monto') || error.message.includes('positivo')) {
+    if (
+      error.message.includes('monto') ||
+      error.message.includes('positivo') ||
+      error.message.includes('supera la deuda') ||
+      error.message.includes('cargos seleccionados')
+    ) {
       return res.status(400).json({ success: false, error: error.message });
     }
     res.status(500).json({ success: false, error: 'Error interno del servidor' });

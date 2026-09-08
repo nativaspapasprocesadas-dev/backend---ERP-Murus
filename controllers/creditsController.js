@@ -7,6 +7,7 @@ const {
   getDebtors,
   getCustomerCreditAccount,
   getDebtorsForExport,
+  getPendingCharges,
   sendPaymentReminder
 } = require('../models/creditsModel');
 const jwt = require('jsonwebtoken');
@@ -194,15 +195,34 @@ const exportDebtors = async (req, res) => {
       return res.status(403).json({ success: false, error: 'No tiene permisos para exportar esta informacion' });
     }
 
-    const { branchId, search } = req.query;
+    const { branchId, search, customerId, dateFrom, dateTo } = req.query;
     // Superadmin puede ver todas las sedes; los demás quedan restringidos a la suya
     const resolvedBranchId = branchId
       ? parseInt(branchId)
       : (decoded.role_name?.toLowerCase() !== 'superadministrador' ? decoded.branch_id : null);
 
+    // Validar formato de las fechas del rango (YYYY-MM-DD)
+    const isValidDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(value);
+    if (dateFrom && !isValidDate(dateFrom)) {
+      return res.status(400).json({ success: false, error: 'dateFrom debe tener formato YYYY-MM-DD' });
+    }
+    if (dateTo && !isValidDate(dateTo)) {
+      return res.status(400).json({ success: false, error: 'dateTo debe tener formato YYYY-MM-DD' });
+    }
+    if (dateFrom && dateTo && dateFrom > dateTo) {
+      return res.status(400).json({ success: false, error: 'dateFrom no puede ser posterior a dateTo' });
+    }
+
+    if (customerId && isNaN(parseInt(customerId))) {
+      return res.status(400).json({ success: false, error: 'customerId invalido' });
+    }
+
     const { debtors, movements } = await getDebtorsForExport({
       branchId: resolvedBranchId,
-      search
+      search,
+      customerId: customerId ? parseInt(customerId) : null,
+      dateFrom: dateFrom || null,
+      dateTo: dateTo || null
     });
 
     // Hoja 1: Resumen de clientes con deuda
@@ -250,14 +270,35 @@ const exportDebtors = async (req, res) => {
     ];
     XLSX.utils.book_append_sheet(wb, wsResumen, 'Resumen');
 
-    const wsDetalle = XLSX.utils.json_to_sheet(detalleRows.length > 0 ? detalleRows : [{ 'Cliente': 'Sin movimientos' }]);
+    const filasDetalle = detalleRows.length > 0 ? detalleRows : [{ 'Cliente': 'Sin movimientos en el periodo seleccionado' }];
+    let wsDetalle;
+
+    if (dateFrom || dateTo) {
+      // Con rango de fechas: se antepone una fila con el periodo aplicado
+      const periodo = dateFrom && dateTo
+        ? `Movimientos del ${dateFrom} al ${dateTo}`
+        : (dateFrom ? `Movimientos desde el ${dateFrom}` : `Movimientos hasta el ${dateTo}`);
+      wsDetalle = XLSX.utils.aoa_to_sheet([[periodo]]);
+      XLSX.utils.sheet_add_json(wsDetalle, filasDetalle, { origin: 'A3' });
+    } else {
+      wsDetalle = XLSX.utils.json_to_sheet(filasDetalle);
+    }
+
     wsDetalle['!cols'] = [
       { wch: 30 }, { wch: 18 }, { wch: 13 }, { wch: 28 }, { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 18 }, { wch: 9 }, { wch: 30 }
     ];
     XLSX.utils.book_append_sheet(wb, wsDetalle, 'Detalle de Movimientos');
 
     const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-    const filename = `creditos_clientes_${getPeruDateString()}.xlsx`;
+
+    // Nombre de archivo: identifica cliente y/o periodo exportado
+    const sufijoCliente = customerId && debtors.length > 0
+      ? `_${debtors[0].customerName.replace(/[^a-zA-Z0-9]+/g, '_').slice(0, 30)}`
+      : '';
+    const sufijoRango = dateFrom || dateTo
+      ? `_${dateFrom || 'inicio'}_a_${dateTo || 'hoy'}`
+      : `_${getPeruDateString()}`;
+    const filename = `creditos_clientes${sufijoCliente}${sufijoRango}.xlsx`;
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -266,6 +307,44 @@ const exportDebtors = async (req, res) => {
   } catch (error) {
     console.error('Error exportando créditos:', error);
     res.status(500).json({ success: false, error: 'Error interno del servidor al exportar créditos' });
+  }
+};
+
+/**
+ * GET /api/v1/credits/customers/:customerId/pending-charges
+ * Cargos con saldo pendiente de un cliente, del mas antiguo al mas reciente.
+ * Alimenta la seleccion de cuentas a cancelar al registrar un pago.
+ * Roles permitidos: SUPERADMINISTRADOR, ADMINISTRADOR, COORDINADOR
+ */
+const listPendingCharges = async (req, res) => {
+  try {
+    const decoded = decodeToken(req);
+    if (!decoded) {
+      return res.status(401).json({ success: false, error: 'Token invalido o expirado' });
+    }
+
+    const allowedRoles = ['superadministrador', 'administrador', 'coordinador'];
+    if (!allowedRoles.includes(decoded.role_name?.toLowerCase())) {
+      return res.status(403).json({ success: false, error: 'No tiene permisos para acceder a esta informacion' });
+    }
+
+    const { customerId } = req.params;
+    if (!customerId || isNaN(parseInt(customerId))) {
+      return res.status(400).json({ success: false, error: 'customerId invalido' });
+    }
+
+    const charges = await getPendingCharges(parseInt(customerId));
+    const totalPending = charges.reduce((acc, c) => acc + c.montoPendiente, 0);
+
+    res.json({
+      success: true,
+      data: charges,
+      totalPending: Math.round(totalPending * 100) / 100
+    });
+
+  } catch (error) {
+    console.error('Error obteniendo cargos pendientes:', error);
+    res.status(500).json({ success: false, error: 'Error interno del servidor' });
   }
 };
 
@@ -319,5 +398,6 @@ module.exports = {
   listDebtors,
   getCustomerAccount,
   exportDebtors,
+  listPendingCharges,
   sendReminder
 };
